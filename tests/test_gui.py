@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -176,4 +177,80 @@ def test_firmware_form_follows_the_selected_ecu(app):
         assert win.fw_editor.form.widget("session").currentText() == "CAL_ONLY"
     finally:
         win.manager.shutdown()
+        win.close()
+
+
+# -- new release files ---------------------------------------------------------------
+def _project_with_ecu(win, tmp_path):
+    (tmp_path / "proj").mkdir()
+    make_hex(tmp_path / "proj" / "app.hex", [(0x10000, b"\x11" * 4096)])
+    (tmp_path / "proj" / "seedkey.py").write_text(open(SEEDKEY_PLUGIN).read())
+    path = str(tmp_path / "proj" / "r.ftproj")
+    win.create_project(path)
+    win.add_target("can")
+    win.fw_editor.add_files([str(tmp_path / "proj" / "app.hex")])
+    _set(win.fw_editor.form, "name", "application")
+    _set(win.target_editor.form, "seed_key.provider", "python")
+    _set(win.target_editor.form, "seed_key.path", "seedkey.py")
+    assert win.save_project()
+    return path
+
+
+def test_new_release_replaces_the_file_and_keeps_its_options(app, tmp_path):
+    import hashlib
+
+    win = MainWindow()
+    try:
+        path = _project_with_ecu(win, tmp_path)
+        (tmp_path / "releases").mkdir()
+        new = make_hex(tmp_path / "releases" / "app_v2.hex", [(0x10000, b"\x22" * 8192)])
+        win._drop_on_ecu([str(new)], 0)  # dropped from the file manager onto the ECU row
+        entry = win.raw["targets"][0]["firmware"][0]
+        assert entry == {"file": str(new), "name": "application"}  # outside the project: absolute path
+        assert "app_v2.hex" in win.table.item(0, win.C_FW).text()
+        assert "app_v2.hex" in win.fw_editor.file_info.text() and "SHA-256" in win.fw_editor.file_info.text()
+        assert win.dirty and win.save_project()
+
+        events = []
+        assert run_job(path, "ecu1", events.append), events[-1].error
+        report = json.load(open(events[-1].report))
+        assert report["firmware"]["sources"][0]["sha256"] == hashlib.sha256(open(new, "rb").read()).hexdigest()
+        assert report["firmware"]["blocks"][0]["name"] == "application"
+    finally:
+        win.manager.shutdown()
+        win.dirty = False
+        win.close()
+
+
+def test_release_pdx_without_the_previous_session_asks(app, tmp_path, monkeypatch):
+    import shutil
+
+    from PySide6.QtWidgets import QInputDialog
+
+    asked = []
+    monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: asked.append(a[3]) or ("FULL", True))
+    shutil.copy(os.path.join(DEMO_DIR, "body_sw.pdx"), tmp_path)
+    entries = [{"file": "old.pdx", "session": "RELEASE_1", "dfi": 0}]
+    from flashtool.gui.project_editor import put_release_file
+
+    put_release_file(entries, str(tmp_path / "body_sw.pdx"), str(tmp_path), 0, lambda n, s: asked.append(s) or "FULL")
+    assert entries == [{"file": "body_sw.pdx", "session": "FULL", "dfi": 0}]
+    assert asked == [["FULL", "CAL_ONLY"]]
+
+
+def test_release_for_an_ecu_with_several_files_asks_which_one(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    win = MainWindow()
+    try:
+        _project_with_ecu(win, tmp_path)
+        make_hex(tmp_path / "proj" / "cal.hex", [(0x80000, b"\x33" * 256)])
+        win.fw_editor.add_files([str(tmp_path / "proj" / "cal.hex")])
+        new_cal = make_hex(tmp_path / "proj" / "cal_v2.hex", [(0x80000, b"\x44" * 256)])
+        monkeypatch.setattr(QInputDialog, "getItem", lambda *a, **k: ("Replace cal.hex", True))
+        win.put_release("ecu1", [str(new_cal)])
+        assert [e["file"] for e in win.raw["targets"][0]["firmware"]] == ["app.hex", "cal_v2.hex"]
+    finally:
+        win.manager.shutdown()
+        win.dirty = False
         win.close()

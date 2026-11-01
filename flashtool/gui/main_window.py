@@ -24,7 +24,7 @@ from ..app.project_io import load_yaml, new_project, new_target, project_from_da
 from ..hal.backends import list_channels
 from ..sequence import events as ev
 from ..sequence.loader import SequenceError, describe_step, flatten, is_builtin, load_sequence, template_path
-from .project_editor import FirmwareEditor, TargetEditor
+from .project_editor import DropTable, FirmwareEditor, TargetEditor, put_release_file
 from .sequence_editor import SequenceEditor
 
 STATUS_COLORS = {
@@ -55,7 +55,8 @@ def _step_id(path: str) -> tuple[str, str]:
 
 
 class MainWindow(QMainWindow):
-    COLS = ("ECU", "Transport", "Status", "Progress", "Speed", "Current step")
+    COLS = ("ECU", "Transport", "Firmware", "Status", "Progress", "Speed", "Current step")
+    C_ECU, C_BUS, C_FW, C_STATUS, C_PROGRESS, C_SPEED, C_STEP = range(7)
 
     def __init__(self, project_path: str | None = None):
         super().__init__()
@@ -116,6 +117,8 @@ class MainWindow(QMainWindow):
         self.act_add.triggered.connect(lambda: self.add_target("can"))
         tb.addAction(self.act_add)
         self.act_remove = action("Remove ECU", self.remove_target)
+        self.act_release = action("Load release file…", self.load_release, "Ctrl+L",
+                                  "New .hex / .s19 / .bin / .pdx for the selected ECU (also: drop a file on its row)")
         self.act_seq = action("Sequence editor…", self.open_sequence_editor, "Ctrl+E",
                               "Build the selected ECU's programming sequence visually")
         tb.addSeparator()
@@ -129,7 +132,9 @@ class MainWindow(QMainWindow):
     def _build_body(self) -> None:
         split = QSplitter(Qt.Orientation.Vertical)
 
-        self.table = QTableWidget(0, len(self.COLS))
+        self.table = DropTable(0, len(self.COLS))
+        self.table.setToolTip("Drop a release file (.hex, .s19, .bin, .pdx) on an ECU to flash it next")
+        self.table.files_dropped.connect(self._drop_on_ecu)
         self.table.setHorizontalHeaderLabels(self.COLS)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -137,8 +142,8 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(self.C_PROGRESS, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(self.C_STEP, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._on_select)
         split.addWidget(self.table)
 
@@ -259,19 +264,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(len(project.targets))
         self._bars.clear()
         for row, t in enumerate(project.targets):
-            label = f"{t.name}  [{t.id}]" + ("  (simulated)" if t.simulate else "")
-            self.table.setItem(row, 0, QTableWidgetItem(label))
-            self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, t.id)
-            self.table.setItem(row, 1, QTableWidgetItem(self._transport_text(t)))
-            for col in (2, 4, 5):
-                self.table.setItem(row, col, QTableWidgetItem(""))
-            bar = QProgressBar()
-            bar.setRange(0, 1000)
-            bar.setFormat("%p%")
-            self.table.setCellWidget(row, 3, bar)
-            self._bars[t.id] = bar
-            self.states.setdefault(t.id, TargetState())
-            self._refresh_row(t.id)
+            self._set_row(row, t)
         self.table.blockSignals(False)
         if project.targets:
             self.table.selectRow(min(select_row, len(project.targets) - 1))
@@ -285,6 +278,28 @@ class MainWindow(QMainWindow):
         self.fw_editor.setEnabled(False)
         self.seq_tree.clear()
         QTreeWidgetItem(self.seq_tree, ["No ECU yet: use Add ECU in the toolbar"])
+
+    def _set_row(self, row: int, t) -> None:
+        label = f"{t.name}  [{t.id}]" + ("  (simulated)" if t.simulate else "")
+        self.table.setItem(row, self.C_ECU, QTableWidgetItem(label))
+        self.table.item(row, self.C_ECU).setData(Qt.ItemDataRole.UserRole, t.id)
+        self.table.setItem(row, self.C_BUS, QTableWidgetItem(self._transport_text(t)))
+        files = ", ".join(os.path.basename(f.file) + (f" [{f.session}]" if f.session else "") for f in t.firmware)
+        fw_item = QTableWidgetItem(files or "– drop a file here –")
+        fw_item.setToolTip("\n".join(f.file for f in t.firmware) or "No firmware yet")
+        self.table.setItem(row, self.C_FW, fw_item)
+        for col in (self.C_STATUS, self.C_SPEED, self.C_STEP):
+            if self.table.item(row, col) is None:
+                self.table.setItem(row, col, QTableWidgetItem(""))
+        bar = self.table.cellWidget(row, self.C_PROGRESS)
+        if not isinstance(bar, QProgressBar):
+            bar = QProgressBar()
+            bar.setRange(0, 1000)
+            bar.setFormat("%p%")
+            self.table.setCellWidget(row, self.C_PROGRESS, bar)
+        self._bars[t.id] = bar
+        self.states.setdefault(t.id, TargetState())
+        self._refresh_row(t.id)
 
     @staticmethod
     def _transport_text(t) -> str:
@@ -300,7 +315,7 @@ class MainWindow(QMainWindow):
 
     def _selected_ids(self) -> list[str]:
         rows = sorted({i.row() for i in self.table.selectedIndexes()})
-        return [self.table.item(r, 0).data(Qt.ItemDataRole.UserRole) for r in rows]
+        return [self.table.item(r, self.C_ECU).data(Qt.ItemDataRole.UserRole) for r in rows]
 
     def _on_select(self) -> None:
         ids = self._selected_ids()
@@ -376,19 +391,7 @@ class MainWindow(QMainWindow):
         self.table.blockSignals(True)
         self.table.setRowCount(len(project.targets))
         for r, t in enumerate(project.targets):
-            label = f"{t.name}  [{t.id}]" + ("  (simulated)" if t.simulate else "")
-            self.table.setItem(r, 0, QTableWidgetItem(label))
-            self.table.item(r, 0).setData(Qt.ItemDataRole.UserRole, t.id)
-            self.table.setItem(r, 1, QTableWidgetItem(self._transport_text(t)))
-            for col in (2, 4, 5):
-                if self.table.item(r, col) is None:
-                    self.table.setItem(r, col, QTableWidgetItem(""))
-            if t.id not in self._bars:
-                bar = QProgressBar()
-                bar.setRange(0, 1000)
-                self.table.setCellWidget(r, 3, bar)
-                self._bars[t.id] = bar
-            self.states.setdefault(t.id, TargetState())
+            self._set_row(r, t)
         self.table.selectRow(min(row, len(project.targets) - 1))
         self.table.blockSignals(False)
         ids = self._selected_ids()
@@ -474,6 +477,61 @@ class MainWindow(QMainWindow):
             self._show_empty()
         else:
             self._on_select()
+
+    def load_release(self) -> None:
+        ids = self._selected_ids()
+        if not ids or self.manager.running:
+            return
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, f"Release file(s) for {ids[0]}", self.settings.value("last_release_dir", self._project_dir()),
+            "Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx);;All files (*)")
+        if paths:
+            self.settings.setValue("last_release_dir", os.path.dirname(paths[0]))
+            self.put_release(ids[0], paths)
+
+    def _drop_on_ecu(self, paths: list[str], row: int) -> None:
+        if row < 0 or self.manager.running or self.project is None:
+            return
+        self.table.selectRow(row)
+        self.put_release(self.table.item(row, self.C_ECU).data(Qt.ItemDataRole.UserRole), paths)
+
+    def put_release(self, target_id: str, paths: list[str]) -> None:
+        """New release for an ECU: each file replaces the matching firmware entry (options kept) or is added."""
+        raw_target = self._raw_target(target_id)
+        if raw_target is None or self.project is None:
+            return
+        entries = raw_target.setdefault("firmware", [])
+        for path in paths:
+            index = self._entry_to_replace(target_id, entries, path)
+            if index == -1:
+                continue  # cancelled
+            try:
+                note = put_release_file(entries, path, self.project.base_dir, index, self.fw_editor._choose_session)
+            except Exception as exc:
+                QMessageBox.warning(self, "Release file", f"{os.path.basename(path)}: {exc}")
+                continue
+            self._log(f"[{target_id}] {note}")
+        self.states[target_id] = TargetState()
+        self._mark_dirty()
+        self._apply_timer.stop()
+        self._apply_edits()
+        if self._selected_ids() == [target_id]:
+            self.fw_editor.set_entries(entries)
+            self.tabs.setCurrentWidget(self.fw_editor)
+
+    def _entry_to_replace(self, target_id: str, entries: list, path: str) -> int | None:
+        """None = add as a new file, -1 = cancelled, otherwise the index to replace."""
+        if not entries:
+            return None
+        if len(entries) == 1:
+            return 0
+        choices = [f"Replace {os.path.basename(str(e.get('file', '')))}" for e in entries] + ["Add as an additional file"]
+        choice, ok = QInputDialog.getItem(self, "Release file", f"{os.path.basename(path)} for {target_id}:",
+                                          choices, 0, False)
+        if not ok:
+            return -1
+        index = choices.index(choice)
+        return None if index == len(entries) else index
 
     def open_sequence_editor(self) -> None:
         ids = self._selected_ids()
@@ -690,17 +748,17 @@ class MainWindow(QMainWindow):
         if not self.project:
             return
         row = next((r for r in range(self.table.rowCount())
-                    if self.table.item(r, 0).data(Qt.ItemDataRole.UserRole) == tid), None)
+                    if self.table.item(r, self.C_ECU).data(Qt.ItemDataRole.UserRole) == tid), None)
         if row is None:
             return
         st = self.states[tid]
-        status_item = self.table.item(row, 2)
+        status_item = self.table.item(row, self.C_STATUS)
         status_item.setText(st.status.upper() if st.status in ("passed", "failed") else st.status)
         color = {"passed": STATUS_COLORS["ok"], "failed": STATUS_COLORS["failed"], "running": STATUS_COLORS["running"]}
         status_item.setForeground(QBrush(QColor(color.get(st.status, "#5b6875"))))
         self._bars[tid].setValue(int(1000 * st.done / st.total) if st.total else 0)
-        self.table.item(row, 4).setText(f"{st.speed / 1024:.1f} KB/s" if st.speed else "")
-        self.table.item(row, 5).setText(st.current)
+        self.table.item(row, self.C_SPEED).setText(f"{st.speed / 1024:.1f} KB/s" if st.speed else "")
+        self.table.item(row, self.C_STEP).setText(st.current)
 
     def _update_actions(self) -> None:
         has_project = self.project is not None
@@ -715,6 +773,7 @@ class MainWindow(QMainWindow):
         self.act_add.setEnabled(self.raw is not None and not running)
         self.act_remove.setEnabled(has_project and not running and bool(self._selected_ids() if hasattr(self, "table") else []))
         self.act_seq.setEnabled(has_project and bool(self._selected_ids() if hasattr(self, "table") else []))
+        self.act_release.setEnabled(has_project and not running and bool(self._selected_ids() if hasattr(self, "table") else []))
         ids = self._selected_ids() if hasattr(self, "table") else []
         self.act_report.setEnabled(bool(ids and self.states.get(ids[0]) and self.states[ids[0]].report))
 

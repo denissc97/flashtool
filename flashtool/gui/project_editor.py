@@ -2,21 +2,109 @@
 
 from __future__ import annotations
 
+import datetime
 import os
 from typing import Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton, QScrollArea, QSplitter,
-    QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton, QScrollArea,
+    QSplitter, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from ..app.project_io import list_templates, new_target
 from ..firmware.loaders import FirmwareError, FirmwareSpec, detect_format, load_firmware, odx_sessions
+from ..firmware.model import sha256_file
 from ..firmware.validate import validate_image
 from .forms import DictForm, F, Section
 
 FIRMWARE_FILTER = "Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx);;All files (*)"
+
+
+def is_firmware_file(path: str) -> bool:
+    try:
+        detect_format(path)
+        return True
+    except FirmwareError:
+        return False
+
+
+def firmware_paths(mime: QMimeData) -> list[str]:
+    """Local firmware files in a drag & drop payload (e.g. from Finder / Explorer)."""
+    return [u.toLocalFile() for u in mime.urls() if u.isLocalFile() and is_firmware_file(u.toLocalFile())]
+
+
+class DropTable(QTableWidget):
+    """Table that accepts firmware files dropped from the file manager. Emits (paths, row under the mouse)."""
+
+    files_dropped = Signal(list, int)
+
+    def __init__(self, rows: int, cols: int, parent=None):
+        super().__init__(rows, cols, parent)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+
+    def dragEnterEvent(self, event) -> None:
+        if firmware_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        paths = firmware_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.files_dropped.emit(paths, self.rowAt(event.position().toPoint().y()))
+
+
+def put_release_file(entries: list, path: str, project_dir: str, index: int | None,
+                     choose_session: Callable[[str, list[str]], str | None]) -> str:
+    """Load a release file: replace entries[index] keeping its options, or append when index is None.
+
+    Returns a one-line description for the log.
+    """
+    rel = os.path.relpath(path, project_dir)
+    stored = path if rel.startswith("..") else rel
+    kind = detect_format(path)
+    replacing = index is not None and 0 <= index < len(entries)
+    if not replacing:
+        entry = {"file": stored}
+        entries.append(entry)
+        action = "added"
+    else:
+        entry = entries[index]
+        action = f"replaced {os.path.basename(str(entry.get('file', '')))} with"
+        entry["file"] = stored
+    if kind == "odx":
+        sessions = [s.label for s in odx_sessions(path)]
+        if entry.get("session") not in sessions:
+            if len(sessions) == 1 or not replacing:  # new file: the session is chosen in the form
+                entry.pop("session", None)
+            else:  # new release no longer has the session used so far
+                chosen = choose_session(os.path.basename(path), sessions)
+                if chosen:
+                    entry["session"] = chosen
+                else:
+                    entry.pop("session", None)
+    else:
+        entry.pop("session", None)
+    if kind == "binary":
+        entry.setdefault("base_address", 0)
+    else:
+        entry.pop("base_address", None)
+    return f"{action} {os.path.basename(path)} ({describe_file(path)})"
+
+
+def describe_file(path: str) -> str:
+    st = os.stat(path)
+    when = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+    return f"{st.st_size} bytes, {when}, SHA-256 {sha256_file(path)[:16]}…"
 
 
 def _transport(d: dict) -> str:
@@ -179,8 +267,10 @@ class FirmwareEditor(QWidget):
         self.project_dir = project_dir
         self.entries: list = []
 
-        self.table = QTableWidget(0, 3)
+        self.table = DropTable(0, 3)
         self.table.setHorizontalHeaderLabels(["File", "Type", "Options"])
+        self.table.setToolTip("Drop .hex / .s19 / .bin / .pdx files here (on a row to replace that file)")
+        self.table.files_dropped.connect(self._dropped)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -189,8 +279,8 @@ class FirmwareEditor(QWidget):
         self.table.itemSelectionChanged.connect(self._on_select)
 
         buttons = QHBoxLayout()
-        for text, slot in (("Add files…", self.add_files), ("Remove", self.remove), ("Up", lambda: self.move(-1)),
-                           ("Down", lambda: self.move(1))):
+        for text, slot in (("Add files…", self.add_files), ("Replace file…", self.replace_file),
+                           ("Remove", self.remove), ("Up", lambda: self.move(-1)), ("Down", lambda: self.move(1))):
             b = QPushButton(text)
             b.clicked.connect(slot)
             buttons.addWidget(b)
@@ -203,15 +293,20 @@ class FirmwareEditor(QWidget):
         form_scroll.setWidgetResizable(True)
 
         self.preview = QTreeWidget()
-        self.preview.setHeaderLabels(["Block / segment", "Start", "End", "Bytes", "DFI", "ALFID", "CRC32"])
+        self.preview.setHeaderLabels(["Block / segment", "Start", "End", "Bytes", "DFI", "ALFID", "CRC32",
+                                      "Identification"])
         self.status = QLabel("")
         self.status.setWordWrap(True)
+        self.file_info = QLabel("")
+        self.file_info.setWordWrap(True)
+        self.file_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(self.table)
         left_layout.addLayout(buttons)
+        left_layout.addWidget(self.file_info)
         left_layout.addWidget(QLabel("Resulting blocks:"))
         left_layout.addWidget(self.preview)
         left_layout.addWidget(self.status)
@@ -262,6 +357,47 @@ class FirmwareEditor(QWidget):
         self.form.setEnabled(row >= 0)
         if row >= 0:
             self.form.set_data(self.entries[row])
+        self._show_file_info(row)
+
+    def _show_file_info(self, row: int) -> None:
+        if row < 0 or row >= len(self.entries):
+            self.file_info.setText("")
+            return
+        path = str(self.entries[row].get("file", ""))
+        path = path if os.path.isabs(path) else os.path.join(self.project_dir(), path)
+        try:
+            self.file_info.setText(f"{os.path.basename(path)}: {describe_file(path)}")
+        except OSError as exc:
+            self.file_info.setText(f"{os.path.basename(path)}: {exc.strerror}")
+
+    def _choose_session(self, name: str, sessions: list[str]) -> str | None:
+        session, ok = QInputDialog.getItem(self, "ODX-F session", f"{name} has several sessions. Flash:", sessions, 0, False)
+        return session if ok else None
+
+    def _dropped(self, paths: list[str], row: int) -> None:
+        if row >= 0 and len(paths) == 1:  # dropped on a file: new release of that file
+            self.replace_file(paths[0], row)
+        else:
+            self.add_files(paths)
+
+    def replace_file(self, path: str | None = None, row: int | None = None) -> None:
+        """Swap the selected file for a new release, keeping its options (session, DFI, addresses)."""
+        row = self._row() if row is None else row
+        if row < 0:
+            self.add_files([path] if path else None)
+            return
+        if path is None:
+            current = str(self.entries[row].get("file", ""))
+            start = os.path.dirname(current if os.path.isabs(current) else os.path.join(self.project_dir(), current))
+            path, _ = QFileDialog.getOpenFileName(self, "New release of this file", start, FIRMWARE_FILTER)
+            if not path:
+                return
+        put_release_file(self.entries, path, self.project_dir(), row, self._choose_session)
+        self._fill()
+        self.table.selectRow(row)
+        self._on_select()
+        self.refresh_preview()
+        self.changed.emit()
 
     def _on_form_change(self) -> None:
         row = self._row()
@@ -277,14 +413,11 @@ class FirmwareEditor(QWidget):
         if paths is None:
             paths, _ = QFileDialog.getOpenFileNames(self, "Add firmware files", base, FIRMWARE_FILTER)
         for path in paths:
-            rel = os.path.relpath(path, base)
-            entry = {"file": path if rel.startswith("..") else rel}
-            if path.lower().endswith((".bin", ".bin_")):
-                entry["base_address"] = 0
-            self.entries.append(entry)
+            put_release_file(self.entries, path, base, None, self._choose_session)
         if paths:
             self._fill()
             self.table.selectRow(len(self.entries) - 1)
+            self._on_select()
             self.refresh_preview()
             self.changed.emit()
 
@@ -322,6 +455,7 @@ class FirmwareEditor(QWidget):
             item = QTreeWidgetItem(self.preview, [
                 b.name, f"0x{b.start:08X}", f"0x{b.end - 1:08X}", f"{b.size}",
                 f"0x{b.data_format_identifier:02X}", f"0x{b.address_and_length_format:02X}", f"{b.crc32:08X}",
+                ", ".join(f"{k}={v}" for k, v in (b.metadata.get("own_idents") or {}).items()),
             ])
             for s in b.segments:
                 QTreeWidgetItem(item, ["segment", f"0x{s.address:08X}", f"0x{s.end - 1:08X}", f"{len(s.data)}"])
