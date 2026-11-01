@@ -52,6 +52,8 @@ class JobSetupError(Exception):
 
 def prepare(project: Project, target: Target) -> tuple[FirmwareImage, dict, list[str]]:
     """Load and check everything that does not need the ECU. Raises JobSetupError."""
+    if not target.firmware:
+        raise JobSetupError(f"{target.id}: no firmware files")
     try:
         image = load_firmware(target.firmware, project.base_dir)
     except FirmwareError as exc:

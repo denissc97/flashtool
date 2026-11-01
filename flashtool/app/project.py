@@ -94,9 +94,7 @@ def _target(raw: dict, index: int) -> Target:
     transport = raw.get("transport", "can")
     if transport not in TRANSPORTS:
         raise ProjectError(f"{where}: transport must be one of {TRANSPORTS}")
-    firmware = raw.get("firmware") or []
-    if not firmware:
-        raise ProjectError(f"{where}: no firmware files")
+    firmware = raw.get("firmware") or []  # may be empty while the project is edited; checked before flashing
     try:
         specs = [FirmwareSpec.from_dict(f if isinstance(f, dict) else {"file": f}) for f in firmware]
     except Exception as exc:
@@ -145,8 +143,10 @@ def load_project(path: str) -> Project:
     except yaml.YAMLError as exc:
         raise ProjectError(f"{path}: invalid YAML: {exc}") from exc
     targets_raw = data.get("targets")
-    if not isinstance(targets_raw, list) or not targets_raw:
-        raise ProjectError(f"{path}: 'targets' must be a non-empty list")
+    if targets_raw is None:
+        targets_raw = []
+    if not isinstance(targets_raw, list):
+        raise ProjectError(f"{path}: 'targets' must be a list")
     targets = [_target(t, i) for i, t in enumerate(targets_raw)]
     ids = [t.id for t in targets]
     if len(set(ids)) != len(ids):

@@ -217,21 +217,24 @@ def validate_sequence(seq: dict) -> None:
     walk(seq["finally"], "finally")
 
 
-def _fmt(value: Any) -> str:
+_HEX_DISPLAY = {"session", "level", "did", "reset", "allow_nrc", "stmin_rx", "security", "read_did", "write_did"}
+
+
+def _fmt(value: Any, key: str = "") -> str:
     if isinstance(value, bool) or value is None:
         return str(value).lower()
     if isinstance(value, int):
-        return f"0x{value:02X}"
+        return f"0x{value:02X}" if key in _HEX_DISPLAY else str(value)
     if isinstance(value, dict):
-        return "{" + ", ".join(f"{k}: {_fmt(v)}" for k, v in value.items()) + "}"
+        return "{" + ", ".join(f"{k}: {_fmt(v, k)}" for k, v in value.items()) + "}"
     if isinstance(value, list):
-        return "[" + ", ".join(_fmt(v) for v in value) + "]"
+        return "[" + ", ".join(_fmt(v, key) for v in value) + "]"
     return str(value)
 
 
 def describe_step(step: dict) -> str:
-    """One-line definition of a step (integers in hex), for display."""
-    return ", ".join(f"{k}: {_fmt(v)}" for k, v in step.items() if k not in ("id", "steps", "else"))
+    """One-line definition of a step (ids, DIDs, sessions in hex), for display."""
+    return ", ".join(f"{k}: {_fmt(v, k)}" for k, v in step.items() if k not in ("id", "steps", "else"))
 
 
 def flatten(steps: list, depth: int = 0) -> list[tuple[int, dict]]:

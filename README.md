@@ -51,6 +51,19 @@ Fișierul `out/audit.jsonl` e un audit log append-only, cu lanț de hash-uri. Î
 | `flashtool audit-verify FIȘIER` | verifică lanțul de hash-uri din audit log |
 | `flashtool gui [PROIECT]` | interfața grafică |
 
+## Lucrul din interfața grafică
+
+Totul se poate face din GUI, fără să editezi fișiere:
+
+| Acțiune | Unde |
+|---|---|
+| Proiect nou / salvare | **New project…**, **Save project** (Ctrl+S) |
+| ECU nou (CAN, CAN FD, LIN, DoIP) | **Add ECU** ▾, apoi tabul **ECU settings** (bus, ID-uri, STmin, timpi, Seed&Key, certificate) |
+| Fișiere de firmware | tabul **Firmware**: **Add files…** pentru hex/s19/bin/pdx/odx-f; în dreapta, adresa pentru `.bin`, sesiunea pentru PDX și parametrii 0x34; dedesubt, blocurile rezultate |
+| Secvență custom | **Sequence editor…** (Ctrl+E): pași din paletă (dublu-click), mutare cu drag & drop sau Move up/down, proprietăți în dreapta, variabile și cataloage în taburi, validare live |
+
+Proiectul și secvențele se salvează tot ca fișiere YAML, ușor de comparat în git. ID-urile și adresele rămân scrise în hex. Înainte de flash, modificările nesalvate se salvează (cu confirmare).
+
 ## Proiect (`*.ftproj`)
 
 Vezi [examples/demo/demo.ftproj](examples/demo/demo.ftproj). Pentru fiecare target configurezi:
