@@ -30,7 +30,7 @@ from ..sequence.loader import (
     SequenceError, block_sequence_key, describe_step, flatten, is_builtin, load_sequence, template_path,
 )
 from .project_editor import (
-    FirmwareEditor, TargetEditor, entry_block_types, entry_path, newer_release, put_release_file, release_candidates,
+    FirmwareEditor, TargetEditor, entry_blocks, entry_path, newer_release, put_release_file, release_candidates,
 )
 from .sequence_editor import SequenceEditor
 from .theme import apply_theme, icon, tokens
@@ -756,7 +756,7 @@ class MainWindow(QMainWindow):
             rows.append({
                 "index": i, "path": entry_path(entry, base), "session": entry.get("session"),
                 "provider": lambda e=dict(entry), i=i: release_candidates(e, base, self._history(target_id, i)),
-                "newer": newer_release(entry, base), "types": entry_block_types(entry, base),
+                "newer": newer_release(entry, base), "blocks": entry_blocks(entry, base),
             })
         card.set_firmware(rows, editable=not self.sealed and target_id not in self.manager.running)
 

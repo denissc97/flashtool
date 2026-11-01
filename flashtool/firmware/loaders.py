@@ -27,7 +27,9 @@ class FirmwareSpec:
     file: str
     name: str | None = None  # block name (PDX / ODX-F: prefix "<name>.<DATABLOCK>")
     type: str | None = None  # block type (BOOT / APP / CAL / DATA / ...); default: from the file, else APP
-    block_index: int | None = None  # logical block index; default: ODX LOGICAL-BLOCK-INDEX
+    # logical block index: a number, or one per block when the file gives several ([1, 2]; null = not set).
+    # Default: ODX-F LOGICAL-BLOCK-INDEX.
+    block_index: int | list[int | None] | None = None
     base_address: int | None = None  # required for .bin
     # Explicit values below win over the file. None = not set: 0x00 / 0x44 for plain files,
     # ENCRYPT-COMPRESS-METHOD / ADDRESS-LENGTH + SIZE-LENGTH for ODX-F.
@@ -50,6 +52,10 @@ class FirmwareSpec:
         if unknown:
             raise FirmwareError(f"Unknown firmware option(s): {', '.join(sorted(unknown))}")
         d = dict(d)
+        index = d.get("block_index")
+        values = index if isinstance(index, list) else [index]
+        if not all(v is None or (isinstance(v, int) and not isinstance(v, bool) and v >= 0) for v in values):
+            raise FirmwareError(f"block_index must be a number, or a list with one number per block, got {index!r}")
         if d.get("erase") is not None:
             d["erase"] = [(int(a), int(n)) for a, n in d["erase"]]
         return cls(**d)
@@ -137,7 +143,7 @@ def _load_odx(spec: FirmwareSpec, path: str) -> tuple[list[LogicalBlock], list[S
         raise FirmwareError(f"{os.path.basename(path)}: 'split' does not apply to PDX/ODX-F "
                             "(blocks are the DATABLOCKs of the session)")
     content = odx_flash.load_odx(path, spec.session)
-    single = [k for k in ("memory_address", "memory_size", "erase", "block_index") if getattr(spec, k) is not None]
+    single = [k for k in ("memory_address", "memory_size", "erase") if getattr(spec, k) is not None]
     if single and len(content.blocks) != 1:
         raise FirmwareError(f"{os.path.basename(path)}: {', '.join(single)} need a single block, session "
                             f"'{content.session.label}' has {len(content.blocks)} DATABLOCKs")
@@ -160,11 +166,22 @@ def _load_odx(spec: FirmwareSpec, path: str) -> tuple[list[LogicalBlock], list[S
 
 
 def _set_type(blocks: list[LogicalBlock], spec: FirmwareSpec) -> list[LogicalBlock]:
-    """Explicit type / index of the project entry win over the file (ODX TYPE, VBF sw_part_type)."""
-    for block in blocks:
+    """Explicit type / index of the project entry win over the file (ODX TYPE / LOGICAL-BLOCK-INDEX, VBF)."""
+    indexes = spec.block_index
+    name = os.path.basename(spec.file)
+    if isinstance(indexes, list):
+        if len(indexes) != len(blocks):
+            raise FirmwareError(f"{name}: block_index has {len(indexes)} value(s), the file gives "
+                                f"{len(blocks)} block(s) ({', '.join(b.name for b in blocks)})")
+    elif indexes is not None:
+        if len(blocks) != 1:
+            raise FirmwareError(f"{name} gives {len(blocks)} blocks ({', '.join(b.name for b in blocks)}): "
+                                "block_index needs one value per block, e.g. [1, 2]")
+        indexes = [indexes]
+    for i, block in enumerate(blocks):
         block.type = normalize_block_type(spec.type) or normalize_block_type(block.metadata.get("type")) or "APP"
-        if spec.block_index is not None:
-            block.index = spec.block_index
+        if indexes is not None and indexes[i] is not None:
+            block.index = indexes[i]
         elif block.index is None and isinstance(block.metadata.get("logical_block_index"), int):
             block.index = block.metadata["logical_block_index"]
     return blocks
@@ -174,8 +191,6 @@ def load_firmware(specs: list[FirmwareSpec], base_dir: str = ".") -> FirmwareIma
     blocks: list[LogicalBlock] = []
     sources: list[SourceFile] = []
     for spec in specs:
-        if spec.block_index is not None and spec.split == "segments":
-            raise FirmwareError(f"{os.path.basename(spec.file)}: block_index needs one block per file (split: file)")
         path = spec.file if os.path.isabs(spec.file) else os.path.join(base_dir, spec.file)
         if not os.path.isfile(path):
             raise FirmwareError(f"Firmware file not found: {path}")
@@ -188,11 +203,7 @@ def load_firmware(specs: list[FirmwareSpec], base_dir: str = ".") -> FirmwareIma
         if spec.session is not None:
             raise FirmwareError(f"{os.path.basename(path)}: 'session' only applies to PDX/ODX-F files")
         if fmt == "vbf":
-            vbf_blocks = _vbf().load_vbf(spec, path)
-            if spec.block_index is not None and len(vbf_blocks) != 1:
-                raise FirmwareError(f"{os.path.basename(path)}: block_index needs a single block, "
-                                    f"the file gives {len(vbf_blocks)}")
-            blocks += _set_type(vbf_blocks, spec)
+            blocks += _set_type(_vbf().load_vbf(spec, path), spec)
             sources.append(_source(path))
             continue
         segs = _read_segments(spec, path)
@@ -201,17 +212,17 @@ def load_firmware(specs: list[FirmwareSpec], base_dir: str = ".") -> FirmwareIma
         sources.append(_source(path))
         stem = spec.name or os.path.splitext(os.path.basename(path))[0]
         groups = [[s] for s in segs] if spec.split == "segments" else [segs]
-        for i, group in enumerate(groups):
-            blocks += _set_type([
-                LogicalBlock(
-                    name=stem if len(groups) == 1 else f"{stem}#{i}",
-                    segments=group,
-                    data_format_identifier=0x00 if spec.dfi is None else spec.dfi,
-                    address_and_length_format=0x44 if spec.alfid is None else spec.alfid,
-                    memory_address=spec.memory_address,
-                    memory_size=spec.memory_size,
-                    erase_ranges=spec.erase,
-                    metadata={"source": path},
-                )
-            ], spec)
+        blocks += _set_type([
+            LogicalBlock(
+                name=stem if len(groups) == 1 else f"{stem}#{i}",
+                segments=group,
+                data_format_identifier=0x00 if spec.dfi is None else spec.dfi,
+                address_and_length_format=0x44 if spec.alfid is None else spec.alfid,
+                memory_address=spec.memory_address,
+                memory_size=spec.memory_size,
+                erase_ranges=spec.erase,
+                metadata={"source": path},
+            )
+            for i, group in enumerate(groups)
+        ], spec)
     return FirmwareImage(blocks=blocks, sources=sources)

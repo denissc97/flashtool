@@ -19,7 +19,7 @@ from ..app.project_io import HexInt
 class F:
     path: str
     label: str
-    kind: str = "text"  # text | int | float | hex | bool | choice | combo | file | expr | bytes | hexlist | params | onoff | boolchoice
+    kind: str = "text"  # text | int | float | hex | bool | choice | combo | file | expr | bytes | hexlist | params | onoff | boolchoice | numbers
     choices: list[str] | Callable[[dict], list[str]] = field(default_factory=list)
     tip: str = ""
     file_filter: str = "All files (*)"
@@ -79,6 +79,8 @@ def to_text(value: Any, kind: str) -> str:
         return f"0x{value:02X}"
     if kind == "hexlist" and isinstance(value, list):
         return ", ".join(f"0x{v:02X}" if isinstance(v, int) else str(v) for v in value)
+    if kind == "numbers" and isinstance(value, list):
+        return ", ".join("-" if v is None else str(v) for v in value)
     if kind == "cyclic" and isinstance(value, list):
         return "; ".join(f"0x{int(m['id']):X}={m.get('data', '')} @{m.get('period_ms', 100)}" for m in value)
     if kind == "params" and isinstance(value, dict):
@@ -95,6 +97,11 @@ def parse(text: str, kind: str) -> Any:
         return _number(text, kind)
     if kind == "hexlist":
         return [_number(t.strip(), "hex") for t in text.split(",") if t.strip()]
+    if kind == "numbers":  # "2" -> 2; "1, -, 3" -> [1, None, 3] (one value per block, '-' = not set)
+        values = [None if t.strip() in ("-", "") else int(t.strip(), 0) for t in text.split(",")]
+        if any(v is not None and v < 0 for v in values):
+            raise ValueError("negative number")
+        return values[0] if len(values) == 1 else values
     if kind == "cyclic":  # "0x500=00 01 @100; 0x501=FF @1000"
         msgs = []
         for part in text.split(";"):
@@ -169,6 +176,7 @@ class DictForm(QWidget):
             return w
         edit = QLineEdit()
         edit.setPlaceholderText({"hex": "0x..", "expr": "expression", "bytes": "hex bytes, ${expr} allowed",
+                                 "numbers": "2, or one per block: 1, 2",
                                  "cyclic": "0x500=00 01 @100; 0x501=FF @1000",
                                  "hexlist": "0x22, 0x31", "params": "name=value; name=value"}.get(f.kind, ""))
         edit.editingFinished.connect(lambda f=f: self._edited(f))

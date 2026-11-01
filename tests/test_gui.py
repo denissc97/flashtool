@@ -28,7 +28,7 @@ def test_opens_demo_project(app):
         assert "download" in win._step_items and "read_boot_version" in win._step_items
         assert "boot_activate" in win._step_items and "cal_erase" in win._step_items  # block sequences
         assert [win.cards["bcm"].fw_rows.itemAt(i).layout().itemAt(1).widget().text() for i in range(3)] \
-            == ["BOOT", "APP", "CAL"]
+            == ["BOOT #0", "APP #1", "CAL #2"]  # block type and logical block index
         assert win.flash_all_btn.isEnabled() and not win.stop_btn.isEnabled()
     finally:
         win.manager.shutdown()
@@ -468,3 +468,52 @@ def test_block_type_proposed_from_file_name(app, tmp_path):
     assert entries == [{"file": "boot_v1.hex", "type": "BOOT"}]
     assert entry_block_types({"file": "body_sw.pdx", "session": "FULL"}, DEMO_DIR) == ["APP", "DATA"]
     assert entry_block_types({"file": "seat_sw.vbf", "type": "cal"}, DEMO_DIR) == ["CAL"]
+
+
+@pytest.mark.req("REQ-15")
+def test_logical_block_index_per_block(app, tmp_path):
+    import shutil
+
+    from flashtool.gui.forms import parse, to_text
+    from flashtool.gui.project_editor import FirmwareEditor, entry_blocks
+
+    assert parse("2", "numbers") == 2 and parse("0x03", "numbers") == 3
+    assert parse("1, -, 4", "numbers") == [1, None, 4] and to_text([1, None, 4], "numbers") == "1, -, 4"
+    with pytest.raises(ValueError):
+        parse("-2", "numbers")
+
+    shutil.copy(os.path.join(DEMO_DIR, "body_sw.pdx"), tmp_path / "body_sw.pdx")
+    make_hex(tmp_path / "cal.hex", [(0x90000, b"\x07" * 64)])
+    editor = FirmwareEditor(lambda: str(tmp_path))
+    entries = [{"file": "body_sw.pdx", "session": "FULL"}, {"file": "cal.hex", "type": "CAL"}]
+    editor.set_entries(entries)
+    assert editor.preview.topLevelItemCount() == 3  # APP + CAL from the PDX, cal.hex
+
+    # double-click in 'Logical block' and type the index: written per block of the entry
+    def type_index(row, text):
+        item = editor.preview.topLevelItem(row)
+        item.setText(2, text)
+
+    type_index(1, "2")  # PDX block CAL
+    assert entries[0]["block_index"] == [None, 2]
+    app.processEvents()
+    type_index(0, "0x01")
+    assert entries[0]["block_index"] == [1, 2]
+    app.processEvents()
+    type_index(2, "5")  # single block: a plain number
+    assert entries[1]["block_index"] == 5
+    app.processEvents()
+    assert [editor.preview.topLevelItem(i).text(2) for i in range(3)] == ["1", "2", "5"]
+    assert editor.form.data is entries[1] and editor.form.widget("block_index").text() == "5"
+    assert entry_blocks(entries[0], str(tmp_path)) == [("APP", 1), ("DATA", 2)]
+    assert editor.table.item(0, 2).text() == "APP #1, DATA #2 (from file)"
+
+    type_index(2, "abc")  # rejected, the stored value stays
+    assert entries[1]["block_index"] == 5 and "not a logical block index" in editor.status.text()
+    app.processEvents()
+    type_index(0, "")
+    type_index(1, "-")
+    app.processEvents()
+    assert "block_index" not in entries[0]  # nothing set: back to the file's values
+    editor.deleteLater()
+    app.processEvents()

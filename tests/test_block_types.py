@@ -60,10 +60,20 @@ def test_block_index_checks(blocks_dir):
     image = load_firmware([FirmwareSpec(file="app.hex", block_index=1),
                            FirmwareSpec(file="cal.hex", block_index=1)], base)
     assert any("logical block index 1" in str(i) for i in validate_image(image))
-    with pytest.raises(FirmwareError, match="block_index needs one block per file"):
+    with pytest.raises(FirmwareError, match=r"gives 2 blocks \(app#0, app#1\): block_index needs one value per"):
         load_firmware([FirmwareSpec(file="app.hex", block_index=1, split="segments")], base)
-    with pytest.raises(FirmwareError, match="need a single block"):
-        load_firmware([FirmwareSpec(file="body_sw.pdx", session="FULL", block_index=1)], DEMO_DIR)
+    with pytest.raises(FirmwareError, match=r"block_index has 3 value\(s\), the file gives 2 block\(s\) \(APP, CAL\)"):
+        load_firmware([FirmwareSpec(file="body_sw.pdx", session="FULL", block_index=[1, 2, 3])], DEMO_DIR)
+    with pytest.raises(FirmwareError, match="block_index must be a number"):
+        FirmwareSpec.from_dict({"file": "app.hex", "block_index": "two"})
+
+
+def test_one_block_index_per_block(blocks_dir):
+    pdx = load_firmware([FirmwareSpec(file="body_sw.pdx", session="FULL", block_index=[1, 2])], DEMO_DIR)
+    assert [(b.name, b.index) for b in pdx.blocks] == [("APP", 1), ("CAL", 2)]
+    segs = load_firmware([FirmwareSpec.from_dict({"file": "app.hex", "split": "segments", "block_index": [None, 5]})],
+                         str(blocks_dir.dir))
+    assert [(b.name, b.index) for b in segs.blocks] == [("app#0", None), ("app#1", 5)]  # null: not set
 
 
 def test_of_type_expression(blocks_dir):

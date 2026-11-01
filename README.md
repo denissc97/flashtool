@@ -92,7 +92,7 @@ Comparația completă cu Vector vFlash este în [docs/VFLASH_COMPARISON.md](docs
 Vezi [examples/demo/demo.ftproj](examples/demo/demo.ftproj). Pentru fiecare target configurezi:
 
 - **transport**: `can`, `canfd`, `lin` (NAD, `n_cs_ms`, `poll_interval_ms`) sau `doip`, cu ID-uri, padding, `tx_dl`, `stmin_rx`, `block_size` și opțional `stmin_tx_override_ms` (abatere de la ISO 15765-2, marcată în raport);
-- **firmware**: hex/s19/bin, `.vbf` sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `type` (BOOT / APP / CAL / DATA / …), `block_index`, plus `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
+- **firmware**: hex/s19/bin, `.vbf` sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `type` (BOOT / APP / CAL / DATA / …), `block_index` (un număr, sau o listă cu câte o valoare pentru fiecare block când fișierul are mai multe, de exemplu `[1, 2]`), plus `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
 - **sequence**: `uds_standard` sau un template propriu care face `extends` și `patch` (vezi [examples/demo/oem_demo.yaml](examples/demo/oem_demo.yaml));
 - **seed_key**: provider `python`, `library` (DLL/.so cu `GenerateKeyEx`/`GenerateKeyExOpt`) sau `bridge` (DLL pe 32 de biți încărcat de un interpretor de 32 de biți).
 
@@ -107,6 +107,12 @@ Fiecare block are un tip:
 - **tipul din proiect**, dacă e setat (`type: CAL`);
 - altfel, **tipul din fișier**: `TYPE` din DATABLOCK-ul ODX-F, `sw_part_type` din VBF;
 - altfel **APP**.
+
+**Logical block index** (`block.index` în template) se setează în două locuri:
+- în tabul Firmware, câmpul **Logical block index**;
+- cu dublu-click pe coloana **Logical block** din lista „Resulting blocks”.
+
+Un fișier care dă mai multe blocuri (o sesiune ODX-F cu mai multe DATABLOCK-uri, un VBF cu mai multe blocuri, un HEX împărțit pe segmente) primește câte un index pentru fiecare block: `1, 2`, iar `-` înseamnă nesetat. La ODX-F, implicit se folosește `LOGICAL-BLOCK-INDEX` din fișier. Pe card, fiecare fișier apare ca `CAL #2` (tip și index). Două blocuri cu același index sunt eroare.
 
 Numele uzuale se recunosc: `CODE`/`EXE` → APP, `FBL`/`BOOTLOADER` → BOOT, `CALIBRATION` → CAL. Când adaugi un `.hex`/`.s19`/`.bin` din interfață, tipul e propus din numele fișierului (`fbl_v3.hex` → BOOT, `cal.s19` → CAL), iar tu îl poți schimba.
 

@@ -32,8 +32,8 @@ targets:
       bus_log: bus.blf
     uds: { p2_ms: 150, p2_star_ms: 5000, tester_present_s: 2.0 }
     firmware:
-      - { file: boot.hex, name: bootloader, type: BOOT }
-      - { file: app.hex, name: application, type: APP }
+      - { file: boot.hex, name: bootloader, type: BOOT, block_index: 0 }
+      - { file: app.hex, name: application, type: APP, block_index: 1 }
       - { file: cal.s19, name: calibration, type: CAL, block_index: 2 }
     sequence: oem_demo.yaml
     simulator:   # logical blocks for erase by block number, routine 0xFF02 = activate the new bootloader

@@ -145,7 +145,8 @@ def cmd_sequence(args: argparse.Namespace) -> int:
     if seq["block_sequences"]:
         print("blocks:")
         for block in image.blocks:
-            print(f"  - {block.name} [{block.type}] -> {block_sequence_key(seq, block.type) or 'no block sequence'}")
+            index = "" if block.index is None else f" #{block.index}"
+            print(f"  - {block.name} [{block.type}{index}] -> {block_sequence_key(seq, block.type) or 'no block sequence'}")
     for w in warnings:
         print(f"warning: {w}")
     return 0

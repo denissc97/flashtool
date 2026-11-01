@@ -163,8 +163,9 @@ class FirmwareImage:  blocks: list[LogicalBlock]; source: str; sha256: str
 **Mai multe logical blocks per ECU (REQ-15).** Fiecare fișier din proiect dă unul sau mai multe blocuri, flash-uite în
 ordinea din proiect. Tipul unui bloc vine, în ordinea priorității, din `type` al intrării din proiect, din fișier
 (ODX-F `DATABLOCK TYPE`, VBF `sw_part_type`) sau e `APP`. Aliasuri: `CODE`/`EXE` → APP, `FBL`/`BOOTLOADER` → BOOT,
-`CALIBRATION` → CAL; celelalte tipuri (SBL, CARCFG...) rămân cum sunt scrise. `block_index` vine din proiect sau din
-ODX-F `LOGICAL-BLOCK-INDEX`; două blocuri cu același index sunt eroare de validare.
+`CALIBRATION` → CAL; celelalte tipuri (SBL, CARCFG...) rămân cum sunt scrise. `block_index` vine din proiect (un număr, sau o
+listă cu o valoare per bloc pentru fișierele cu mai multe blocuri; `null` = nesetat) sau din ODX-F `LOGICAL-BLOCK-INDEX`.
+Două blocuri cu același index sunt eroare de validare.
 
 **Fișiere deja comprimate/criptate (REQ-01).** Tool-ul **nu** comprimă și **nu** criptează. Trimite octeții exact
 cum sunt în fișier și setează parametrii din 0x34 din configurație:

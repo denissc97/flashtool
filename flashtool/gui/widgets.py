@@ -192,7 +192,10 @@ class EcuCard(QFrame):
         self.fw_icon.setVisible(not t.firmware)
 
     def set_firmware(self, rows: list[dict], editable: bool) -> None:
-        """One release picker per firmware entry: {index, path, provider, newer, session, types}."""
+        """One release picker per firmware entry: {index, path, provider, newer, session, blocks}.
+
+        `blocks`: (type, logical block index) of each block the entry gives.
+        """
         while self.fw_rows.count():
             item = self.fw_rows.takeAt(0)
             if item.layout() is not None:
@@ -213,11 +216,11 @@ class EcuCard(QFrame):
             combo.setEnabled(editable)
             combo.chosen.connect(lambda path, i=row["index"]: self.release_chosen.emit(self.target_id, i, path))
             line.addWidget(ico)
-            for kind in row.get("types") or []:  # BOOT / APP / CAL / DATA: which block sequence runs
-                tag = pill(kind, "badge")
+            for kind, index in dict.fromkeys(row.get("blocks") or []):  # which block sequence runs, which block
+                tag = pill(kind if index is None else f"{kind} #{index}", "badge")
                 tags.append(tag)
                 tag.setToolTip(f"Block type {kind}: programmed with the {kind} block sequence of the template "
-                               "(or the default one)")
+                               "(or the default one)" + ("" if index is None else f"\nLogical block index {index}"))
                 line.addWidget(tag)
             line.addWidget(combo, 1)
             if row.get("session"):

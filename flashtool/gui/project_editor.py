@@ -8,7 +8,7 @@ import os
 import re
 from typing import Callable
 
-from PySide6.QtCore import QMimeData, Qt, Signal
+from PySide6.QtCore import QMimeData, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QPushButton, QScrollArea,
     QSplitter, QTableWidget, QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
 
 from ..app.project_io import list_templates, new_target
 from ..firmware.loaders import FirmwareError, FirmwareSpec, detect_format, load_firmware, odx_sessions
-from ..firmware.model import BLOCK_TYPES, normalize_block_type, sha256_file
+from ..firmware.model import BLOCK_TYPES, FirmwareImage, normalize_block_type, sha256_file
 from ..firmware.validate import validate_image
 from .forms import DictForm, F, Section
 
@@ -29,7 +29,7 @@ _GUESS = [  # file name -> proposed block type (shown in the editor, changeable)
     (re.compile(r"(^|[^a-z])(data|dataset)([^a-z]|$)", re.I), "DATA"),
     (re.compile(r"(^|[^a-z])(app|appl|application)([^a-z]|$)", re.I), "APP"),
 ]
-_TYPES_CACHE: dict[tuple, list[str]] = {}
+_BLOCKS_CACHE: dict[tuple, list[tuple[str, int | None]]] = {}
 
 
 def guess_block_type(path: str) -> str | None:
@@ -38,25 +38,35 @@ def guess_block_type(path: str) -> str | None:
     return next((kind for pattern, kind in _GUESS if pattern.search(stem)), None)
 
 
-def entry_block_types(entry: dict, project_dir: str) -> list[str]:
-    """Block types of one firmware entry: the explicit type, else what the file says (ODX-F, VBF), else APP."""
-    explicit = normalize_block_type(entry.get("type"))
-    if explicit:
-        return [explicit]
+def entry_blocks(entry: dict, project_dir: str) -> list[tuple[str, int | None]]:
+    """(type, logical block index) of each block of one firmware entry; [] when the file cannot be loaded."""
     path = entry_path(entry, project_dir)
+    index = entry.get("block_index")
     try:
-        if detect_format(path) in _PLAIN:
-            return ["APP"]
+        if detect_format(path) in _PLAIN and entry.get("split") != "segments" and not isinstance(index, list):
+            return [(normalize_block_type(entry.get("type")) or "APP", index)]  # one block, no need to read it
         st = os.stat(path)
     except (FirmwareError, OSError):
         return []
-    key = (path, st.st_mtime_ns, st.st_size, entry.get("session"))
-    if key not in _TYPES_CACHE:
+    key = (path, st.st_mtime_ns, st.st_size, entry.get("session"), entry.get("type"), entry.get("split"),
+           tuple(index) if isinstance(index, list) else index)
+    if key not in _BLOCKS_CACHE:
         try:
-            _TYPES_CACHE[key] = load_firmware([FirmwareSpec.from_dict(dict(entry))], project_dir).types
+            image = load_firmware([FirmwareSpec.from_dict(dict(entry))], project_dir)
+            _BLOCKS_CACHE[key] = [(b.type, b.index) for b in image.blocks]
         except Exception:
-            _TYPES_CACHE[key] = []
-    return _TYPES_CACHE[key]
+            _BLOCKS_CACHE[key] = []
+    return _BLOCKS_CACHE[key]
+
+
+def entry_block_types(entry: dict, project_dir: str) -> list[str]:
+    """Block types of one firmware entry: the explicit type, else what the file says (ODX-F, VBF), else APP."""
+    return list(dict.fromkeys(kind for kind, _ in entry_blocks(entry, project_dir)))
+
+
+def block_label(kind: str, index: int | None) -> str:
+    """'CAL #2' - block type and logical block index, as shown on cards and in the firmware table."""
+    return kind if index is None else f"{kind} #{index}"
 
 
 def is_firmware_file(path: str) -> bool:
@@ -336,8 +346,11 @@ def firmware_sections(project_dir: Callable[[], str]) -> list[Section]:
             F("type", "Block type", "combo", [""] + list(BLOCK_TYPES),
               tip="Selects the block sequence of the template (BOOT, APP, CAL, DATA or your own type). "
                   "Empty: from the file (ODX-F TYPE, VBF sw_part_type), else APP"),
-            F("block_index", "Logical block index", "int",
-              tip="Block number for templates that erase by block (${block.index}); ODX-F: from the file"),
+            F("block_index", "Logical block index", "numbers",
+              tip="Block number used by templates that erase / check by block (${block.index}).\n"
+                  "Files with several blocks (ODX-F session, VBF, HEX split by segments): one value per block, "
+                  "in order, e.g. 1, 2 ('-' = not set). Also editable in the 'Resulting blocks' list. "
+                  "ODX-F: default LOGICAL-BLOCK-INDEX"),
         ]),
         Section("New releases", [
             F("release_dir", "Release folder", "dir",
@@ -423,8 +436,14 @@ class FirmwareEditor(QWidget):
         form_scroll.setWidgetResizable(True)
 
         self.preview = QTreeWidget()
-        self.preview.setHeaderLabels(["Block / segment", "Type", "Start", "End", "Bytes", "DFI", "ALFID", "CRC32",
-                                      "Identification"])
+        self.preview.setHeaderLabels(["Block / segment", "Type", "Logical block", "Start", "End", "Bytes", "DFI",
+                                      "ALFID", "CRC32", "Identification"])
+        self.preview.setToolTip("Double-click 'Logical block' to set the logical block index of a block")
+        self.preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)  # only the index column
+        self.preview.itemDoubleClicked.connect(self._edit_index)
+        self.preview.itemChanged.connect(self._index_edited)
+        self._preview_blocks: list[tuple[int, int, object]] = []  # (entry row, block position in entry, block)
+        self._filling_preview = False
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.file_info = QLabel("")
@@ -474,8 +493,9 @@ class FirmwareEditor(QWidget):
             except FirmwareError:
                 kind = "?"
             opts = ", ".join(f"{k}={v:#x}" if isinstance(v, int) and not isinstance(v, bool) else f"{k}={v}"
-                             for k, v in e.items() if k not in ("file", "type"))
-            types = ", ".join(entry_block_types(e, self.project_dir())) or "?"
+                             for k, v in e.items() if k not in ("file", "type", "block_index"))
+            labels = list(dict.fromkeys(block_label(t, i) for t, i in entry_blocks(e, self.project_dir())))
+            types = ", ".join(labels) or "?"
             if not e.get("type"):
                 types += " (from file)" if kind not in _PLAIN else " (default)"
             for col, text in enumerate((str(e.get("file", "")), kind, types, opts)):
@@ -573,26 +593,82 @@ class FirmwareEditor(QWidget):
         self.refresh_preview()
         self.changed.emit()
 
-    def refresh_preview(self) -> None:
-        self.preview.clear()
-        if not self.entries:
-            self.status.setText("Add .hex, .s19, .bin, .pdx or .odx-f files.")
+    def _edit_index(self, item: QTreeWidgetItem, column: int) -> None:
+        if column == 2 and item.data(0, Qt.ItemDataRole.UserRole) is not None:
+            self.preview.editItem(item, 2)
+
+    def _index_edited(self, item: QTreeWidgetItem, column: int) -> None:
+        where = item.data(0, Qt.ItemDataRole.UserRole)
+        if self._filling_preview or column != 2 or where is None:
             return
+        text = item.text(2).strip()
         try:
-            image = load_firmware([FirmwareSpec.from_dict(dict(e)) for e in self.entries], self.project_dir())
-        except Exception as exc:
+            value = None if text in ("", "-") else int(text, 0)
+            if value is not None and value < 0:
+                raise ValueError(text)
+        except ValueError:
             self.status.setStyleSheet("color: #b42318")
-            self.status.setText(str(exc))
+            self.status.setText(f"'{text}' is not a logical block index (a number, e.g. 2 or 0x02)")
+            QTimer.singleShot(0, self.refresh_preview)  # back to the stored value
             return
-        for b in image.blocks:
-            item = QTreeWidgetItem(self.preview, [
-                b.name, b.type + ("" if b.index is None else f" #{b.index}"),
-                f"0x{b.start:08X}", f"0x{b.end - 1:08X}", f"{b.size}",
-                f"0x{b.data_format_identifier:02X}", f"0x{b.address_and_length_format:02X}", f"{b.crc32:08X}",
-                ", ".join(f"{k}={v}" for k, v in (b.metadata.get("own_idents") or {}).items()),
-            ])
-            for s in b.segments:
-                QTreeWidgetItem(item, ["segment", "", f"0x{s.address:08X}", f"0x{s.end - 1:08X}", f"{len(s.data)}"])
+        self.set_block_index(*where, value)
+
+    def set_block_index(self, row: int, position: int, value: int | None) -> None:
+        """Logical block index of one block; entries with several blocks keep one value per block."""
+        entry = self.entries[row]
+        mine = [b for r, _, b in self._preview_blocks if r == row]
+        if len(mine) <= 1:
+            if value is None:
+                entry.pop("block_index", None)
+            else:
+                entry["block_index"] = value
+        else:
+            current = entry.get("block_index")
+            values = list(current) if isinstance(current, list) and len(current) == len(mine) \
+                else [b.index for b in mine]
+            values[position] = value
+            if all(v is None for v in values):
+                entry.pop("block_index", None)
+            else:
+                entry["block_index"] = values
+        self._fill()
+        self.table.selectRow(row)
+        self._on_select()
+        QTimer.singleShot(0, self.refresh_preview)  # not while the edited item is still in use
+        self.changed.emit()
+
+    def refresh_preview(self) -> None:
+        self._filling_preview = True
+        self.preview.clear()
+        self._preview_blocks = []
+        try:
+            if not self.entries:
+                self.status.setText("Add .hex, .s19, .bin, .pdx, .odx-f or .vbf files.")
+                return
+            try:  # entry by entry, so that an edited index can be written back to its entry
+                for row, e in enumerate(self.entries):
+                    blocks = load_firmware([FirmwareSpec.from_dict(dict(e))], self.project_dir()).blocks
+                    self._preview_blocks += [(row, pos, b) for pos, b in enumerate(blocks)]
+            except Exception as exc:
+                self.status.setStyleSheet("color: #b42318")
+                self.status.setText(str(exc))
+                return
+            for row, pos, b in self._preview_blocks:
+                item = QTreeWidgetItem(self.preview, [
+                    b.name, b.type, "" if b.index is None else str(b.index),
+                    f"0x{b.start:08X}", f"0x{b.end - 1:08X}", f"{b.size}",
+                    f"0x{b.data_format_identifier:02X}", f"0x{b.address_and_length_format:02X}", f"{b.crc32:08X}",
+                    ", ".join(f"{k}={v}" for k, v in (b.metadata.get("own_idents") or {}).items()),
+                ])
+                item.setData(0, Qt.ItemDataRole.UserRole, (row, pos))
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+                item.setToolTip(2, "Double-click to set the logical block index")
+                for s in b.segments:
+                    QTreeWidgetItem(item, ["segment", "", "", f"0x{s.address:08X}", f"0x{s.end - 1:08X}",
+                                           f"{len(s.data)}"])
+        finally:
+            self._filling_preview = False
+        image = FirmwareImage(blocks=[b for _, _, b in self._preview_blocks])
         issues = validate_image(image)
         if issues:
             self.status.setStyleSheet("color: #b42318" if any(i.severity == "error" for i in issues) else "color: #b7791f")
@@ -600,4 +676,4 @@ class FirmwareEditor(QWidget):
         else:
             self.status.setStyleSheet("color: #2f7d5b")
             self.status.setText(f"{len(image.blocks)} block(s), {image.total_size} bytes, "
-                                f"flash order: {' → '.join(f'{b.name} [{b.type}]' for b in image.blocks)}")
+                                f"flash order: {' → '.join(f'{b.name} [{block_label(b.type, b.index)}]' for b in image.blocks)}")
