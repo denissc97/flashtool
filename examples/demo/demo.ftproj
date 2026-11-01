@@ -52,7 +52,7 @@ targets:
     simulate: true
     lin: { backend: virtual, channel: sim-lin, baudrate: 19200, nad: 0x0A, n_cs_ms: 0, poll_interval_ms: 2 }
     firmware:
-      - { file: cal.s19 }
+      - { file: seat_sw.vbf }   # Volvo Binary Format: part number, erase list and CRCs from the file
     sequence: uds_standard
     seed_key: { provider: python, path: seedkey_demo.py }
 

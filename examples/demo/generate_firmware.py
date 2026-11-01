@@ -6,6 +6,8 @@ import zipfile
 
 import bincopy
 
+from flashtool.firmware.vbf import crc16_ccitt_false, crc32
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -34,7 +36,29 @@ def main() -> None:
         z.writestr("FL_BODY.odx-f", ODX_F)
         z.write(os.path.join(HERE, "app.hex"), "app.hex")
         z.write(os.path.join(HERE, "cal.s19"), "cal.s19")
-    print("app.hex, cal.s19, gateway.bin, body_sw.pdx written")
+    write_vbf(os.path.join(HERE, "seat_sw.vbf"), 0x0008_0000, blob(5, 16 * 1024))
+    print("app.hex, cal.s19, gateway.bin, body_sw.pdx, seat_sw.vbf written")
+
+
+def write_vbf(path: str, address: int, data: bytes) -> None:
+    """VBF (Volvo Binary Format): text header, then [address][length][data][CRC16] blocks."""
+    body = address.to_bytes(4, "big") + len(data).to_bytes(4, "big") + data + crc16_ccitt_false(data).to_bytes(2, "big")
+    header = (
+        "vbf_version = 2.6;\n"
+        "header {\n"
+        '    description = {"FlashTool demo seat module calibration"};\n'
+        '    sw_part_number = "32212345";\n'
+        '    sw_version = "AA";\n'
+        "    sw_part_type = DATA;\n"
+        "    data_format_identifier = 0x00;\n"
+        "    network = LIN;\n"
+        "    ecu_address = 0x0A;\n"
+        f"    erase = {{ {{ 0x{address:08X}, 0x{len(data):08X} }} }};\n"
+        f"    file_checksum = 0x{crc32(body):08X};\n"
+        "}"
+    )
+    with open(path, "wb") as f:
+        f.write(header.encode() + body)
 
 
 def _datablock(ident: str, kind: str, start: int, end: int, part: str) -> str:

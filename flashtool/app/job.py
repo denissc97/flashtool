@@ -34,7 +34,7 @@ from ..sequence.loader import SequenceError, flatten, load_sequence
 from ..sim.ecu import SimConfig, SimulatedEcu
 from ..transport.base import Transport, TransportError
 from ..transport.doip import DoIpTransport
-from ..transport.isotp_can import IsoTpCanTransport
+from ..transport.isotp_can import IsoTpCanTransport, cyclic_messages
 from ..transport.lin_tp import LinTpTransport
 from ..uds.client import UdsClient
 from ..uds.trace import TraceEntry, TraceSink
@@ -110,8 +110,18 @@ class SharedCanBus:
                                     "must use the same bitrate / CAN FD settings")
         self.bus = create_can_bus(first.hardware, bitrate=first.bitrate, fd=first.fd, data_bitrate=first.data_bitrate)
         self.notifier = can.Notifier(self.bus, [], timeout=0.1)
+        unique = {(int(e["id"]), str(e.get("data", "")), float(e.get("period_ms", 100))): e
+                  for t in targets for e in (t.can.cyclic if t.can else [])}
+        try:
+            self.tasks = [self.bus.send_periodic(m, p) for m, p in cyclic_messages(list(unique.values()), first.fd)]
+        except TransportError as exc:
+            self.notifier.stop()
+            self.bus.shutdown()
+            raise JobSetupError(str(exc)) from exc
 
     def close(self) -> None:
+        for task in self.tasks:
+            task.stop()
         self.notifier.stop()
         self.bus.shutdown()
 
@@ -243,7 +253,7 @@ def run_target(project: Project, target: Target, emit: Emit, cancel=None, *, bro
             variables = {k: render_value(v, sequence["variables"]) for k, v in sequence["variables"].items()}
             engine = Engine(job=target.id, client=client, transport=transport, image=image, variables=variables,
                             seedkey=seedkey, emit=emit, cancel=CancelToken(cancel), credentials=credentials,
-                            group=group, catalog=sequence["catalog"])
+                            group=group, catalog=sequence["catalog"], allow_scripts=target.allow_custom_actions)
             engine_ran = True
             success, error = engine.run(sequence)
             report["steps"] = [asdict(r) for r in engine.records]

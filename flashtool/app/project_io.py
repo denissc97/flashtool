@@ -109,7 +109,14 @@ def project_from_data(data: dict, path: str):
     return project
 
 
+def _check_editable(path: str) -> None:
+    from .package import check_editable  # sealed packages are read-only
+
+    check_editable(path)
+
+
 def save_project(data: dict, path: str) -> None:
+    _check_editable(path)
     validate_project_data(data, path)
     with open(path, "w", encoding="utf-8") as f:
         f.write("# FlashTool project - written by the FlashTool editor\n" + dump_yaml(data))
@@ -163,6 +170,7 @@ def validate_sequence_data(data: dict, path: str) -> dict:
 def save_sequence(data: dict, path: str) -> None:
     if os.path.dirname(os.path.abspath(path)) == os.path.abspath(BUILTIN_DIR):
         raise SequenceError("built-in templates are read-only; save the sequence in the project folder")
+    _check_editable(path)
     validate_sequence_data(data, path)
     clean = {k: v for k, v in copy.deepcopy(data).items() if v not in (None, "", [], {}) or k in ("steps",)}
     with open(path, "w", encoding="utf-8") as f:

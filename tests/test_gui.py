@@ -23,10 +23,10 @@ def app():
 def test_opens_demo_project(app):
     win = MainWindow(os.path.join(DEMO_DIR, "demo.ftproj"))
     try:
-        assert win.table.rowCount() == 5
+        assert len(win.cards) == 5 and not win.empty.isVisibleTo(win)
         assert win.fw_editor.preview.topLevelItemCount() == 2  # bcm: application + calibration
         assert "download" in win._step_items and "read_boot_version" in win._step_items
-        assert win.act_flash_all.isEnabled() and not win.act_stop.isEnabled()
+        assert win.flash_all_btn.isEnabled() and not win.stop_btn.isEnabled()
     finally:
         win.manager.shutdown()
         win.close()
@@ -168,11 +168,9 @@ def test_invalid_step_value_is_rejected(app, tmp_path):
 def test_firmware_form_follows_the_selected_ecu(app):
     win = MainWindow(os.path.join(DEMO_DIR, "demo.ftproj"))
     try:
-        win.table.selectRow(0)
-        win._on_select()
+        win.select_target("bcm")
         assert win.fw_editor.form.data["file"] == "app.hex"
-        win.table.selectRow(1)  # door: firmware from the PDX
-        win._on_select()
+        win.select_target("door")  # firmware from the PDX
         assert win.fw_editor.form.data["file"] == "body_sw.pdx"
         assert win.fw_editor.form.widget("session").currentText() == "CAL_ONLY"
     finally:
@@ -204,10 +202,10 @@ def test_new_release_replaces_the_file_and_keeps_its_options(app, tmp_path):
         path = _project_with_ecu(win, tmp_path)
         (tmp_path / "releases").mkdir()
         new = make_hex(tmp_path / "releases" / "app_v2.hex", [(0x10000, b"\x22" * 8192)])
-        win._drop_on_ecu([str(new)], 0)  # dropped from the file manager onto the ECU row
+        win.cards["ecu1"].files_dropped.emit("ecu1", [str(new)])  # dropped from the file manager on the card
         entry = win.raw["targets"][0]["firmware"][0]
         assert entry == {"file": str(new), "name": "application"}  # outside the project: absolute path
-        assert "app_v2.hex" in win.table.item(0, win.C_FW).text()
+        assert "app_v2.hex" in win.cards["ecu1"].files.text()
         assert "app_v2.hex" in win.fw_editor.file_info.text() and "SHA-256" in win.fw_editor.file_info.text()
         assert win.dirty and win.save_project()
 
@@ -253,4 +251,62 @@ def test_release_for_an_ecu_with_several_files_asks_which_one(app, tmp_path, mon
     finally:
         win.manager.shutdown()
         win.dirty = False
+        win.close()
+
+
+# -- modern UI ---------------------------------------------------------------------
+def test_theme_toggle_and_empty_project(app, tmp_path):
+    from flashtool.gui.theme import tokens
+
+    win = MainWindow()
+    try:
+        win.create_project(str(tmp_path / "empty.ftproj"))
+        assert not win.cards and win.empty.isVisibleTo(win) and not win.flash_all_btn.isEnabled()
+        before = tokens()["bg"]
+        win.toggle_theme()
+        assert tokens()["bg"] != before
+        win.toggle_theme()
+        assert tokens()["bg"] == before
+    finally:
+        win.manager.shutdown()
+        win.close()
+
+
+def test_reports_page_shows_runs_and_timing(app, tmp_path):
+    win = MainWindow()
+    try:
+        path = _project_with_ecu(win, tmp_path)
+        assert run_job(path, "ecu1", lambda e: None)
+        win.show_page("reports")
+        assert win.runs.rowCount() == 1 and win.runs.item(0, 2).text() == "PASSED"
+        win.runs.selectRow(0)
+        labels = [label for label, _, _ in win.chart.rows]
+        assert "blocks" in labels and any(label.startswith("end:") for label in labels)
+        assert "KB/s" in win.run_info.text()
+    finally:
+        win.manager.shutdown()
+        win.dirty = False
+        win.close()
+
+
+def test_sealed_package_opens_read_only(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    from flashtool.app.package import export_pack, import_pack
+
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: shown.append(a[1]))
+    win = MainWindow()
+    try:
+        path = _project_with_ecu(win, tmp_path)
+        pack = export_pack(path, str(tmp_path / "release.ftpack"), sealed=True)
+        project_file = import_pack(pack, str(tmp_path / "unpacked"))
+        win.open_project(project_file)
+        assert win.sealed and not win.side_buttons["save"].isEnabled()
+        assert not win.target_editor.isEnabled() and not win.cards["ecu1"].release_btn.isVisibleTo(win)
+        win.put_release("ecu1", [str(tmp_path / "proj" / "app.hex")])
+        assert shown == ["Sealed package"] and not win.dirty
+        assert win.flash_all_btn.isEnabled()  # flashing stays possible
+    finally:
+        win.manager.shutdown()
         win.close()

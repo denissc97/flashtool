@@ -56,6 +56,8 @@ STEP_TYPES = [
      {"read_did": {"did": HexInt(0xF189), "store": "value"}}),
     ("write_did", "Write DID", "0x2E", {"write_did": {"did": HexInt(0xF15A), "data": "00"}}),
     ("log", "Log message", "Write a line to the trace and the log", {"log": "message"}),
+    ("script", "Custom action (Python)", "Run a Python function (coding, backup, checks); the ECU must allow it",
+     {"script": "actions/custom_action.py", "function": "run"}),
 ]
 TYPE_LABEL = {k: label for k, label, _, _ in STEP_TYPES}
 
@@ -112,6 +114,8 @@ KIND_FIELDS = {
     "read_did": [F("read_did.did", "DID", "hex"), F("read_did.store", "Store in variable")],
     "write_did": [F("write_did.did", "DID", "hex"), F("write_did.data", "Data", "bytes")],
     "log": [F("log", "Message")],
+    "script": [F("script", "Python file", "file", file_filter="Python (*.py)"), F("function", "Function"),
+               F("args", "Arguments", "params", tip="name=value; name=value – available as ctx.args")],
 }
 RESPONSE_KINDS = {"request", "service", "session", "reset", "security", "read_did", "write_did", "authenticate"}
 

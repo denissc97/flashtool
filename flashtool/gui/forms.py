@@ -79,6 +79,8 @@ def to_text(value: Any, kind: str) -> str:
         return f"0x{value:02X}"
     if kind == "hexlist" and isinstance(value, list):
         return ", ".join(f"0x{v:02X}" if isinstance(v, int) else str(v) for v in value)
+    if kind == "cyclic" and isinstance(value, list):
+        return "; ".join(f"0x{int(m['id']):X}={m.get('data', '')} @{m.get('period_ms', 100)}" for m in value)
     if kind == "params" and isinstance(value, dict):
         return "; ".join(f"{k}={to_text(v, 'hex' if isinstance(v, int) else 'text')}" for k, v in value.items())
     return str(value)
@@ -93,6 +95,17 @@ def parse(text: str, kind: str) -> Any:
         return _number(text, kind)
     if kind == "hexlist":
         return [_number(t.strip(), "hex") for t in text.split(",") if t.strip()]
+    if kind == "cyclic":  # "0x500=00 01 @100; 0x501=FF @1000"
+        msgs = []
+        for part in text.split(";"):
+            if not part.strip():
+                continue
+            ident, _, rest = part.partition("=")
+            data, _, period = rest.partition("@")
+            bytes.fromhex(data.replace(" ", ""))  # validates
+            msgs.append({"id": HexInt(int(ident.strip(), 0)), "data": data.strip(),
+                         "period_ms": int(period.strip() or 100)})
+        return msgs
     if kind == "params":
         out = {}
         for part in text.split(";"):
@@ -156,6 +169,7 @@ class DictForm(QWidget):
             return w
         edit = QLineEdit()
         edit.setPlaceholderText({"hex": "0x..", "expr": "expression", "bytes": "hex bytes, ${expr} allowed",
+                                 "cyclic": "0x500=00 01 @100; 0x501=FF @1000",
                                  "hexlist": "0x22, 0x31", "params": "name=value; name=value"}.get(f.kind, ""))
         edit.editingFinished.connect(lambda f=f: self._edited(f))
         self._widgets[f.path] = (f, edit)

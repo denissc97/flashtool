@@ -15,7 +15,7 @@ python3.12 -m venv .venv            # sau: uv venv -p 3.12 .venv
 ## Încercare rapidă pe Mac
 
 ```bash
-# 5 ECU-uri simulate: bcm + door pe același bus CAN (door din PDX), seat pe LIN,
+# 5 ECU-uri simulate: bcm + door pe același bus CAN (door din PDX), seat pe LIN (din VBF),
 # gateway pe CAN FD, adas pe DoIP cu certificat (0x29)
 .venv/bin/flashtool flash examples/demo/demo.ftproj
 
@@ -49,28 +49,46 @@ Fișierul `out/audit.jsonl` e un audit log append-only, cu lanț de hash-uri. Î
 | `flashtool sim-doip [--port 13400]` | pornește un ECU DoIP simulat, de folosit cu alt tool |
 | `flashtool sim-pki DIR` | creează un CA de test + certificat de tester, pentru ECU-ul simulat |
 | `flashtool audit-verify FIȘIER` | verifică lanțul de hash-uri din audit log |
+| `flashtool pack PROIECT -o X.ftpack [--sealed]` | exportă proiectul cu tot ce folosește într-un pachet |
+| `flashtool unpack X.ftpack DEST` / `verify-pack X.ftpack` | despachetează (după verificare) / verifică un pachet |
 | `flashtool gui [PROIECT]` | interfața grafică |
 
-## Lucrul din interfața grafică
+## Interfața grafică
 
-Totul se poate face din GUI, fără să editezi fișiere:
+Navigarea se face din bara laterală, iar tema light/dark se schimbă din butonul de jos, sau urmează automat setarea sistemului.
 
-| Acțiune | Unde |
+| Pagină | Ce faci acolo |
 |---|---|
-| Proiect nou / salvare | **New project…**, **Save project** (Ctrl+S) |
-| ECU nou (CAN, CAN FD, LIN, DoIP) | **Add ECU** ▾, apoi tabul **ECU settings** (bus, ID-uri, STmin, timpi, Seed&Key, certificate) |
-| Fișiere de firmware | tabul **Firmware**: **Add files…** pentru hex/s19/bin/pdx/odx-f; în dreapta, adresa pentru `.bin`, sesiunea pentru PDX și parametrii 0x34; dedesubt, blocurile rezultate |
-| Release nou (alt hex / PDX) | **Load release file…** (Ctrl+L) sau trage fișierul din Finder / Explorer pe rândul ECU-ului. Fișierul vechi e înlocuit, iar opțiunile lui (sesiune, adresă, DFI) se păstrează. Fișierul poate fi oriunde pe disc. Coloana **Firmware** și tabul Firmware arată ce se va scrie: data, SHA-256, part number-ele din ODX |
-| Secvență custom | **Sequence editor…** (Ctrl+E): pași din paletă (dublu-click), mutare cu drag & drop sau Move up/down, proprietăți în dreapta, variabile și cataloage în taburi, validare live |
+| **Flash** | Câte un card pentru fiecare ECU: bus, fișierele de firmware, stare, progres, viteză, timp rămas, pasul curent. **Flash all** sau **Flash** per ECU. Un release nou se trage din Finder / Explorer direct pe card (sau **Change release…**). |
+| **Configure** | Lista de ECU-uri (**Add ECU** pentru CAN, CAN FD, LIN sau DoIP), apoi taburile **ECU settings** (bus, ID-uri, STmin, timpi, Seed&Key, certificate, mesaje CAN ciclice, custom actions), **Firmware** (fișiere, sesiune ODX-F, parametri 0x34 și blocurile rezultate), **Sequence** și **Sequence YAML**. **Sequence editor…** deschide editorul vizual de secvențe. |
+| **Trace & log** | Request-urile și răspunsurile UDS pentru ECU-ul ales, plus log-ul tuturor job-urilor. |
+| **Reports** | Toate rulările, cu rezultat, durată și eroare; pentru rularea selectată, unde s-a dus timpul (graficul duratelor pe pași) și throughput-ul transferului. |
+| **Hardware** | Interfețele CAN detectate. |
 
-Proiectul și secvențele se salvează tot ca fișiere YAML, ușor de comparat în git. ID-urile și adresele rămân scrise în hex. Înainte de flash, modificările nesalvate se salvează (cu confirmare).
+În secțiunea Project din bara laterală:
+- **New**, **Open** și **Save** (Ctrl+S) pentru proiect;
+- **Export package…** și **Import package…** pentru pachetele `.ftpack`.
+
+Scurtături: Ctrl+L (release nou pentru ECU-ul selectat), Ctrl+E (editorul de secvențe), Ctrl+F (flash pentru ECU-ul selectat), Ctrl+Shift+F (flash all), Esc (stop).
+
+## Funcții ca în vFlash
+
+Comparația completă cu Vector vFlash este în [docs/VFLASH_COMPARISON.md](docs/VFLASH_COMPARISON.md).
+
+| Funcție | Cum |
+|---|---|
+| **VBF** (Volvo / Geely / JLR) | Fișierul `.vbf` se adaugă ca orice firmware. Part number-ul, zonele de erase, DFI-ul și semnătura se citesc din header. CRC16 pe fiecare bloc și `file_checksum` sunt verificate. |
+| **Pachete** `.ftpack` (ca `.vflashpack`) | **Export package…** sau `flashtool pack PROIECT -o x.ftpack [--sealed]`. Pachetul conține proiectul, firmware-ul, secvențele, cataloagele, Seed&Key și certificatele, plus un manifest cu SHA-256. Un pachet **sigilat** se deschide read-only: se poate face flash, dar nu se poate edita. Cheile private nu sunt incluse decât cu `--include-private-keys`. |
+| **Custom actions** (ca Custom Actions VDS) | Pasul „Custom action (Python)” din editorul de secvențe apelează `run(ctx)` dintr-un fișier `.py`. `ctx` oferă `request`, `read_did`, `write_did`, `vars`, `log`, `sleep` și `args`. Pasul rulează doar dacă ECU-ul are **Allow custom actions** bifat. |
+| **Mesaje CAN ciclice** | În ECU settings, câmpul Cyclic messages, de exemplu `0x500=00 01 @100`: mesajul se trimite la fiecare 100 ms cât durează flash-ul (network management, keep-alive). |
+| **API Python** | `from flashtool import api; api.flash("proiect.ftproj", on_event=print)`, pentru CI/CD și bancuri de test. |
 
 ## Proiect (`*.ftproj`)
 
 Vezi [examples/demo/demo.ftproj](examples/demo/demo.ftproj). Pentru fiecare target configurezi:
 
 - **transport**: `can`, `canfd`, `lin` (NAD, `n_cs_ms`, `poll_interval_ms`) sau `doip`, cu ID-uri, padding, `tx_dl`, `stmin_rx`, `block_size` și opțional `stmin_tx_override_ms` (abatere de la ISO 15765-2, marcată în raport);
-- **firmware**: hex/s19/bin sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
+- **firmware**: hex/s19/bin, `.vbf` sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
 - **sequence**: `uds_standard` sau un template propriu care face `extends` și `patch` (vezi [examples/demo/oem_demo.yaml](examples/demo/oem_demo.yaml));
 - **seed_key**: provider `python`, `library` (DLL/.so cu `GenerateKeyEx`/`GenerateKeyExOpt`) sau `bridge` (DLL pe 32 de biți încărcat de un interpretor de 32 de biți).
 

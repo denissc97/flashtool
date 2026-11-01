@@ -12,7 +12,7 @@ BUILTIN_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "template
 
 STEP_KINDS = (
     "request", "service", "session", "security", "authenticate", "download", "foreach", "if", "tester_present",
-    "delay_ms", "wait_ecu", "reset", "read_did", "write_did", "log",
+    "delay_ms", "wait_ecu", "reset", "read_did", "write_did", "log", "script",
 )
 COMMON_KEYS = {
     "id", "name", "functional", "timeout_ms", "allow_nrc", "expect_response", "expect_data",
@@ -24,6 +24,7 @@ EXTRA_KEYS = {
     "reset": {"wait_ms"},
     "download": {"max_block_length"},
     "service": {"params"},
+    "script": {"function", "args"},
 }
 ON_FAIL = ("abort", "continue", "retry")
 
@@ -84,6 +85,19 @@ def is_builtin(path: str) -> bool:
     return os.path.dirname(os.path.abspath(path)) == os.path.abspath(BUILTIN_DIR)
 
 
+def _resolve_scripts(value: Any, base_dir: str) -> None:
+    """Custom action paths are relative to the template that names them."""
+    if isinstance(value, list):
+        for v in value:
+            _resolve_scripts(v, base_dir)
+    elif isinstance(value, dict):
+        if isinstance(value.get("script"), str) and not os.path.isabs(value["script"]):
+            value["script"] = os.path.normpath(os.path.join(base_dir, value["script"]))
+        for v in value.values():
+            if isinstance(v, (list, dict)):
+                _resolve_scripts(v, base_dir)
+
+
 def load_sequence(ref: str, base_dir: str = ".", _chain: tuple[str, ...] = ()) -> dict:
     """Load a template and resolve its `extends` chain into one flat sequence."""
     path = _resolve_path(ref, base_dir)
@@ -93,6 +107,8 @@ def load_sequence(ref: str, base_dir: str = ".", _chain: tuple[str, ...] = ()) -
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise SequenceError(f"{path}: template must be a mapping")
+    for key in ("steps", "finally", "patch"):
+        _resolve_scripts(data.get(key), os.path.dirname(path))
 
     if "extends" in data:
         seq = load_sequence(data["extends"], os.path.dirname(path), _chain + (path,))

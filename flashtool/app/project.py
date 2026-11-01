@@ -38,6 +38,7 @@ class Target:
     seed_key: SeedKeyConfig
     certificates: CertConfig = field(default_factory=CertConfig)
     catalog: list = field(default_factory=list)  # paths or {file, layer} - diagnostic catalogs
+    allow_custom_actions: bool = False  # sequences may run Python custom actions ('script' steps)
     simulate: bool = False
     simulator: dict = field(default_factory=dict)
 
@@ -87,7 +88,7 @@ def _target(raw: dict, index: int) -> Target:
     tid = str(raw.get("id") or f"target{index + 1}")
     where = f"target '{tid}'"
     known = {"id", "name", "transport", "can", "doip", "lin", "uds", "firmware", "sequence", "variables",
-             "seed_key", "certificates", "catalog", "simulate", "simulator"}
+             "seed_key", "certificates", "catalog", "allow_custom_actions", "simulate", "simulator"}
     unknown = set(raw) - known
     if unknown:
         raise ProjectError(f"{where}: unknown option(s) {', '.join(sorted(unknown))}")
@@ -113,6 +114,7 @@ def _target(raw: dict, index: int) -> Target:
         seed_key=_build(SeedKeyConfig, raw.get("seed_key"), f"{where}.seed_key"),
         certificates=_build(CertConfig, raw.get("certificates"), f"{where}.certificates"),
         catalog=raw["catalog"] if isinstance(raw.get("catalog"), list) else ([raw["catalog"]] if raw.get("catalog") else []),
+        allow_custom_actions=bool(raw.get("allow_custom_actions", False)),
         simulate=bool(raw.get("simulate", False)),
         simulator=dict(raw.get("simulator") or {}),
     )

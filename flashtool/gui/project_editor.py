@@ -127,6 +127,8 @@ def target_sections(project_dir: Callable[[], str]) -> list[Section]:
               tip="No hardware needed: the ECU is simulated on a virtual bus / localhost"),
             F("sequence", "Sequence", "combo", templates,
               tip="Built-in template name or a .yaml sequence in the project folder"),
+            F("allow_custom_actions", "Allow custom actions (Python)", "bool",
+              tip="Sequences may run Python scripts ('Custom action' steps). Off by default."),
         ]),
         Section("CAN / CAN FD", [
             F("can.backend", "Interface", "choice", ["virtual", "vector", "socketcan", "pcan", "kvaser"]),
@@ -145,6 +147,8 @@ def target_sections(project_dir: Callable[[], str]) -> list[Section]:
             F("can.stmin_tx_override_ms", "Override ECU STmin (ms)", "float",
               tip="Deviation from ISO 15765-2, reported as a warning"),
             F("can.bus_log", "CAN log file (.blf/.asc)"),
+            F("can.cyclic", "Cyclic messages", "cyclic",
+              tip="Sent while flashing, e.g. network management: 0x500=00 01 @100 (id=data @period ms; …)"),
         ], lambda d: _transport(d) in ("can", "canfd")),
         Section("LIN", [
             F("lin.backend", "Interface", "choice", ["virtual", "vector"]),

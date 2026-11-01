@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import glob
+import json
 import os
 import re
 import sys
 from collections import deque
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QFont, QKeySequence, QTextCursor
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QFileDialog, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QMainWindow,
-    QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSplitter, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QAbstractItemView, QApplication, QButtonGroup, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+    QHeaderView, QInputDialog, QLabel, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+    QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStackedWidget, QTableWidget, QTableWidgetItem, QTabWidget,
+    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
 from .. import __version__
@@ -24,14 +27,19 @@ from ..app.project_io import load_yaml, new_project, new_target, project_from_da
 from ..hal.backends import list_channels
 from ..sequence import events as ev
 from ..sequence.loader import SequenceError, describe_step, flatten, is_builtin, load_sequence, template_path
-from .project_editor import DropTable, FirmwareEditor, TargetEditor, put_release_file
+from .project_editor import FirmwareEditor, TargetEditor, put_release_file
 from .sequence_editor import SequenceEditor
+from .theme import apply_theme, icon, tokens
+from .widgets import BUS_LABEL, DurationChart, EcuCard
 
-STATUS_COLORS = {
-    "ok": "#2f7d5b", "failed": "#b42318", "warning": "#b7791f", "skipped": "#8e9aa6", "running": "#3b5b92",
-    "shared": "#2b7a8c",
-}
 TRACE_LINES = 20000
+FIRMWARE_FILTER = "Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx *.vbf);;All files (*)"
+
+
+def status_color(status: str) -> str:
+    t = tokens()
+    return {"ok": t["ok"], "failed": t["fail"], "warning": t["warn"], "skipped": t["muted"], "running": t["run"],
+            "shared": t["muted"]}.get(status, t["text"])
 
 
 @dataclass
@@ -54,29 +62,66 @@ def _step_id(path: str) -> tuple[str, str]:
     return last, " / ".join(items)
 
 
+def _page(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout, QHBoxLayout]:
+    page = QWidget()
+    page.setObjectName("page")
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(24, 20, 24, 16)
+    layout.setSpacing(14)
+    header = QHBoxLayout()
+    titles = QVBoxLayout()
+    t = QLabel(title)
+    t.setProperty("role", "h1")
+    titles.addWidget(t)
+    if subtitle:
+        s = QLabel(subtitle)
+        s.setProperty("role", "muted")
+        titles.addWidget(s)
+    header.addLayout(titles)
+    header.addStretch(1)
+    layout.addLayout(header)
+    return page, layout, header
+
+
 class MainWindow(QMainWindow):
-    COLS = ("ECU", "Transport", "Firmware", "Status", "Progress", "Speed", "Current step")
-    C_ECU, C_BUS, C_FW, C_STATUS, C_PROGRESS, C_SPEED, C_STEP = range(7)
+    PAGES = ("flash", "configure", "trace", "reports", "hardware")
 
     def __init__(self, project_path: str | None = None):
         super().__init__()
-        self.setWindowTitle(f"FlashTool {__version__}")
-        self.resize(1280, 800)
+        self.resize(1360, 860)
         self.settings = QSettings("FlashTool", "FlashTool")
         self.project: Project | None = None
         self.raw: dict | None = None  # project file content, edited by the visual editors
         self.project_path: str | None = None
         self.dirty = False
-        self._seq_editor: SequenceEditor | None = None
-        self.manager = JobManager()
+        self.sealed = False  # project unpacked from a sealed .ftpack: flash only, no edits
+        self.current_id: str | None = None
+        self.cards: dict[str, EcuCard] = {}
         self.states: dict[str, TargetState] = {}
-        self._bars: dict[str, QProgressBar] = {}
+        self._seq_editor: SequenceEditor | None = None
         self._step_items: dict[str, QTreeWidgetItem] = {}
         self._pending_trace: list[tuple[str, str]] = []
+        self._tpl_path: str | None = None
+        self.manager = JobManager()
+        self.theme_mode = str(self.settings.value("theme", "system"))
+        app = QApplication.instance()
+        if app is not None:
+            apply_theme(app, self.theme_mode)
 
-        self._build_toolbar()
-        self._build_body()
-        self.statusBar().showMessage("Open a project (.ftproj) to start")
+        self.stack = QStackedWidget()
+        central = QWidget()
+        row = QHBoxLayout(central)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        row.addWidget(self._build_sidebar())
+        row.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
+        for build in (self._build_flash_page, self._build_configure_page, self._build_trace_page,
+                      self._build_reports_page, self._build_hardware_page):
+            self.stack.addWidget(build())
+        self._build_shortcuts()
+        self.show_page("flash")
+        self._update_title()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._pump_events)
@@ -87,93 +132,178 @@ class MainWindow(QMainWindow):
         path = project_path or self.settings.value("last_project")
         if path and os.path.isfile(str(path)):
             self.open_project(str(path))
-
-    # -- layout ------------------------------------------------------------
-    def _build_toolbar(self) -> None:
-        tb = QToolBar("Main")
-        tb.setMovable(False)
-        self.addToolBar(tb)
-
-        def action(text, slot, shortcut=None, tip=None):
-            a = QAction(text, self)
-            a.triggered.connect(slot)
-            if shortcut:
-                a.setShortcut(QKeySequence(shortcut))
-            if tip:
-                a.setToolTip(tip)
-            tb.addAction(a)
-            return a
-
-        self.act_new = action("New project…", self._new_project, "Ctrl+N")
-        self.act_open = action("Open project…", self._choose_project, "Ctrl+O")
-        self.act_save = action("Save project", self.save_project, "Ctrl+S")
-        self.act_reload = action("Reload", self._reload, "Ctrl+R", "Re-read the project and firmware files")
-        tb.addSeparator()
-        add_menu = QMenu(self)
-        for bus, label in (("can", "CAN"), ("canfd", "CAN FD"), ("lin", "LIN"), ("doip", "DoIP (Ethernet)")):
-            add_menu.addAction(f"ECU on {label}", lambda b=bus: self.add_target(b))
-        self.act_add = QAction("Add ECU", self)
-        self.act_add.setMenu(add_menu)
-        self.act_add.triggered.connect(lambda: self.add_target("can"))
-        tb.addAction(self.act_add)
-        self.act_remove = action("Remove ECU", self.remove_target)
-        self.act_release = action("Load release file…", self.load_release, "Ctrl+L",
-                                  "New .hex / .s19 / .bin / .pdx for the selected ECU (also: drop a file on its row)")
-        self.act_seq = action("Sequence editor…", self.open_sequence_editor, "Ctrl+E",
-                              "Build the selected ECU's programming sequence visually")
-        tb.addSeparator()
-        self.act_flash_all = action("Flash all", self._flash_all, "Ctrl+Shift+F", "Flash every target in parallel")
-        self.act_flash_sel = action("Flash selected", self._flash_selected, "Ctrl+F")
-        self.act_stop = action("Stop", self._stop, "Esc", "Cancel at the next safe point; post-programming still runs")
-        tb.addSeparator()
-        self.act_report = action("Open report", self._open_report, None, "Open the HTML report of the selected target")
         self._update_actions()
 
-    def _build_body(self) -> None:
-        split = QSplitter(Qt.Orientation.Vertical)
+    # ======================================================================== layout
+    def _build_sidebar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("sidebar")
+        bar.setFixedWidth(214)
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(14, 18, 14, 14)
+        layout.setSpacing(4)
+        name = QLabel("FlashTool")
+        name.setProperty("role", "h1")
+        version = QLabel(f"UDS flashing · v{__version__}")
+        version.setProperty("role", "muted")
+        layout.addWidget(name)
+        layout.addWidget(version)
+        layout.addSpacing(18)
 
-        self.table = DropTable(0, len(self.COLS))
-        self.table.setToolTip("Drop a release file (.hex, .s19, .bin, .pdx) on an ECU to flash it next")
-        self.table.files_dropped.connect(self._drop_on_ecu)
-        self.table.setHorizontalHeaderLabels(self.COLS)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.verticalHeader().setVisible(False)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(self.C_PROGRESS, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(self.C_STEP, QHeaderView.ResizeMode.Stretch)
-        self.table.itemSelectionChanged.connect(self._on_select)
-        split.addWidget(self.table)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav: dict[str, QPushButton] = {}
+        for key, text, ico in (("flash", "Flash", "flash"), ("configure", "Configure", "config"),
+                               ("trace", "Trace && log", "trace"), ("reports", "Reports", "report"),
+                               ("hardware", "Hardware", "chip")):
+            b = QPushButton(text)
+            b.setProperty("nav", True)
+            b.setProperty("icon_name", ico)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _=False, k=key: self.show_page(k))
+            self.nav_group.addButton(b)
+            self.nav[key] = b
+            layout.addWidget(b)
+        layout.addStretch(1)
+
+        project_label = QLabel("PROJECT")
+        project_label.setProperty("role", "muted")
+        layout.addWidget(project_label)
+        self.side_buttons: dict[str, QPushButton] = {}
+        for key, text, ico, slot in (("new", "New project…", "new", self._new_project),
+                                     ("open", "Open project…", "open", self._choose_project),
+                                     ("save", "Save project", "save", self.save_project),
+                                     ("export", "Export package…", "package", self._export_pack),
+                                     ("import", "Import package…", "package", self._import_pack)):
+            b = QPushButton(text)
+            b.setProperty("nav", True)
+            b.setProperty("icon_name", ico)
+            b.clicked.connect(slot)
+            self.side_buttons[key] = b
+            layout.addWidget(b)
+        layout.addSpacing(10)
+        self.theme_btn = QPushButton()
+        self.theme_btn.setProperty("nav", True)
+        self.theme_btn.clicked.connect(self.toggle_theme)
+        layout.addWidget(self.theme_btn)
+        self._refresh_sidebar_icons()
+        return bar
+
+    def _refresh_sidebar_icons(self) -> None:
+        color = tokens()["sidebar_text"]
+        for b in list(self.nav.values()) + list(self.side_buttons.values()):
+            b.setIcon(icon(b.property("icon_name"), color, 18))
+        dark = tokens()["bg"] == "#12161c"
+        self.theme_btn.setText("Light mode" if dark else "Dark mode")
+        self.theme_btn.setIcon(icon("sun" if dark else "moon", color, 18))
+
+    def _build_flash_page(self) -> QWidget:
+        page, layout, header = _page("Flash")
+        self.project_title = header.itemAt(0).layout().itemAt(0).widget()
+        self.project_path_label = QLabel("")
+        self.project_path_label.setProperty("role", "muted")
+        header.itemAt(0).layout().addWidget(self.project_path_label)
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setProperty("kind", "danger")
+        self.stop_btn.clicked.connect(self._stop)
+        self.flash_all_btn = QPushButton("Flash all")
+        self.flash_all_btn.setProperty("kind", "primary")
+        self.flash_all_btn.clicked.connect(self._flash_all)
+        header.addWidget(self.stop_btn)
+        header.addWidget(self.flash_all_btn)
+
+        self.summary = QLabel("")
+        self.summary.setProperty("role", "muted")
+        layout.addWidget(self.summary)
+
+        self.cards_host = QWidget()
+        self.cards_grid = QGridLayout(self.cards_host)
+        self.cards_grid.setContentsMargins(0, 0, 0, 0)
+        self.cards_grid.setSpacing(14)
+        self.cards_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.cards_scroll = QScrollArea()
+        self.cards_scroll.setWidgetResizable(True)
+        self.cards_scroll.setWidget(self.cards_host)
+        self.cards_scroll.viewport().installEventFilter(self)
+
+        self.empty = QFrame()
+        self.empty.setObjectName("card")
+        el = QVBoxLayout(self.empty)
+        el.setContentsMargins(30, 30, 30, 30)
+        msg = QLabel("No ECU in this project yet")
+        msg.setProperty("role", "h2")
+        hint = QLabel("Add an ECU, then drop its .hex / .s19 / .bin / .pdx / .vbf release file on the card.")
+        hint.setProperty("role", "muted")
+        add = QPushButton("Add ECU")
+        add.setProperty("kind", "primary")
+        add.setMenu(self._bus_menu())
+        for w in (msg, hint, add):
+            el.addWidget(w, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self.empty)
+        layout.addWidget(self.cards_scroll, 1)
+        return page
+
+    def _bus_menu(self) -> QMenu:
+        menu = QMenu(self)
+        for bus, label in (("can", "CAN"), ("canfd", "CAN FD"), ("lin", "LIN"), ("doip", "DoIP (Ethernet)")):
+            menu.addAction(f"ECU on {label}", lambda b=bus: self.add_target(b))
+        return menu
+
+    def _build_configure_page(self) -> QWidget:
+        page, layout, header = _page("Configure", "ECU settings, firmware files and the programming sequence")
+        self.seq_editor_btn = QPushButton("Sequence editor…")
+        self.seq_editor_btn.clicked.connect(self.open_sequence_editor)
+        self.release_btn = QPushButton("Load release file…")
+        self.release_btn.clicked.connect(lambda: self.load_release())
+        header.addWidget(self.release_btn)
+        header.addWidget(self.seq_editor_btn)
+
+        left = QFrame()
+        left.setObjectName("card")
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(10, 10, 10, 10)
+        title = QLabel("ECUs")
+        title.setProperty("role", "h2")
+        ll.addWidget(title)
+        self.ecu_list = QListWidget()
+        self.ecu_list.currentItemChanged.connect(
+            lambda cur, _prev: cur is not None and self.select_target(cur.data(Qt.ItemDataRole.UserRole)))
+        ll.addWidget(self.ecu_list, 1)
+        buttons = QHBoxLayout()
+        self.add_btn = QPushButton("Add ECU")
+        self.add_btn.setMenu(self._bus_menu())
+        self.remove_btn = QPushButton("Remove")
+        self.remove_btn.clicked.connect(self.remove_target)
+        buttons.addWidget(self.add_btn)
+        buttons.addWidget(self.remove_btn)
+        ll.addLayout(buttons)
 
         self.tabs = QTabWidget()
-        mono = QFont("Menlo" if sys.platform == "darwin" else "Consolas" if sys.platform == "win32" else "Monospace")
-        mono.setStyleHint(QFont.StyleHint.Monospace)
-
         self.target_editor = TargetEditor(self._project_dir)
         self.target_editor.changed.connect(self._mark_dirty)
         self.tabs.addTab(self.target_editor, "ECU settings")
-
         self.fw_editor = FirmwareEditor(self._project_dir)
         self.fw_editor.changed.connect(self._mark_dirty)
         self.tabs.addTab(self.fw_editor, "Firmware")
 
+        seq_page = QWidget()
+        sl = QVBoxLayout(seq_page)
         self.seq_tree = QTreeWidget()
         self.seq_tree.setHeaderLabels(["Step", "Definition", "Status", "Info"])
         self.seq_tree.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.tabs.addTab(self.seq_tree, "Sequence")
+        sl.addWidget(self.seq_tree)
+        self.tabs.addTab(seq_page, "Sequence")
 
-        editor = QWidget()
-        ed_layout = QVBoxLayout(editor)
+        yaml_page = QWidget()
+        yl = QVBoxLayout(yaml_page)
         self.tpl_path_label = QLabel("")
-        self.tpl_path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.tpl_path_label.setProperty("role", "muted")
         self.tpl_edit = QPlainTextEdit()
-        self.tpl_edit.setFont(mono)
+        self.tpl_edit.setFont(self._mono())
         self.tpl_edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         self.tpl_status = QLabel("")
         self.tpl_status.setWordWrap(True)
-        buttons = QHBoxLayout()
+        tb = QHBoxLayout()
         self.btn_validate = QPushButton("Validate")
         self.btn_validate.clicked.connect(self._validate_template)
         self.btn_save = QPushButton("Save")
@@ -181,56 +311,147 @@ class MainWindow(QMainWindow):
         self.btn_derive = QPushButton("New OEM template from this…")
         self.btn_derive.clicked.connect(self._derive_template)
         for b in (self.btn_validate, self.btn_save, self.btn_derive):
-            buttons.addWidget(b)
-        buttons.addStretch(1)
-        ed_layout.addWidget(self.tpl_path_label)
-        ed_layout.addWidget(self.tpl_edit)
-        ed_layout.addLayout(buttons)
-        ed_layout.addWidget(self.tpl_status)
-        self.tabs.addTab(editor, "Sequence YAML")
-        self._tpl_path: str | None = None
+            tb.addWidget(b)
+        tb.addStretch(1)
+        yl.addWidget(self.tpl_path_label)
+        yl.addWidget(self.tpl_edit, 1)
+        yl.addLayout(tb)
+        yl.addWidget(self.tpl_status)
+        self.tabs.addTab(yaml_page, "Sequence YAML")
 
+        split = QSplitter(Qt.Orientation.Horizontal)
+        split.addWidget(left)
+        split.addWidget(self.tabs)
+        split.setSizes([260, 900])
+        layout.addWidget(split, 1)
+        return page
+
+    def _build_trace_page(self) -> QWidget:
+        page, layout, header = _page("Trace & log", "UDS requests and responses per ECU, and the log of all jobs")
+        self.trace_ecu = QComboBox()
+        self.trace_ecu.currentIndexChanged.connect(lambda _i: self._show_trace(self.trace_ecu.currentData()))
+        header.addWidget(QLabel("ECU"))
+        header.addWidget(self.trace_ecu)
         self.trace_view = QPlainTextEdit(readOnly=True)
-        self.trace_view.setFont(mono)
+        self.trace_view.setFont(self._mono())
         self.trace_view.setMaximumBlockCount(TRACE_LINES)
         self.trace_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.tabs.addTab(self.trace_view, "UDS trace")
-
         self.log_view = QPlainTextEdit(readOnly=True)
-        self.log_view.setFont(mono)
+        self.log_view.setFont(self._mono())
         self.log_view.setMaximumBlockCount(5000)
-        self.tabs.addTab(self.log_view, "Log")
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.trace_view)
+        split.addWidget(self.log_view)
+        split.setSizes([520, 200])
+        layout.addWidget(split, 1)
+        return page
 
-        hw = QWidget()
-        hw_layout = QVBoxLayout(hw)
+    def _build_reports_page(self) -> QWidget:
+        page, layout, header = _page("Reports", "Every flash run with its result, and where the time went")
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self._refresh_reports)
+        self.open_report_btn = QPushButton("Open report")
+        self.open_report_btn.setProperty("kind", "primary")
+        self.open_report_btn.clicked.connect(self._open_selected_report)
+        header.addWidget(refresh)
+        header.addWidget(self.open_report_btn)
+        self.runs = QTableWidget(0, 6)
+        self.runs.setHorizontalHeaderLabels(["ECU", "Started", "Result", "Duration", "Bytes", "Error"])
+        self.runs.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.runs.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.runs.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.runs.verticalHeader().setVisible(False)
+        self.runs.setAlternatingRowColors(True)
+        self.runs.horizontalHeader().setStretchLastSection(True)
+        self.runs.itemSelectionChanged.connect(self._show_run)
+        self.runs.doubleClicked.connect(lambda _i: self._open_selected_report())
+        self.run_info = QLabel("")
+        self.run_info.setProperty("role", "muted")
+        self.chart = DurationChart()
+        chart_scroll = QScrollArea()
+        chart_scroll.setWidgetResizable(True)
+        chart_scroll.setWidget(self.chart)
+        split = QSplitter(Qt.Orientation.Vertical)
+        split.addWidget(self.runs)
+        bottom = QWidget()
+        bl = QVBoxLayout(bottom)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.addWidget(self.run_info)
+        bl.addWidget(chart_scroll, 1)
+        split.addWidget(bottom)
+        split.setSizes([300, 420])
+        layout.addWidget(split, 1)
+        self._run_paths: list[str] = []
+        return page
+
+    def _build_hardware_page(self) -> QWidget:
+        page, layout, header = _page("Hardware", "CAN interfaces found through python-can "
+                                                 "(Vector XL on Windows, SocketCAN on Linux)")
+        detect = QPushButton("Detect hardware")
+        detect.setProperty("kind", "primary")
+        detect.clicked.connect(self._detect_hw)
+        header.addWidget(detect)
         self.hw_list = QPlainTextEdit(readOnly=True)
-        self.hw_list.setFont(mono)
-        refresh = QPushButton("Detect hardware")
-        refresh.clicked.connect(self._detect_hw)
-        hw_layout.addWidget(QLabel("CAN channels detected through python-can (Vector XL on Windows, SocketCAN on Linux):"))
-        hw_layout.addWidget(self.hw_list)
-        hw_layout.addWidget(refresh, alignment=Qt.AlignmentFlag.AlignLeft)
-        self.tabs.addTab(hw, "Hardware")
+        self.hw_list.setFont(self._mono())
+        layout.addWidget(self.hw_list, 1)
+        return page
 
-        split.addWidget(self.tabs)
-        split.setSizes([260, 540])
-        self.setCentralWidget(split)
+    def _build_shortcuts(self) -> None:
+        for key, slot in (("Ctrl+N", self._new_project), ("Ctrl+O", self._choose_project), ("Ctrl+S", self.save_project),
+                          ("Ctrl+L", lambda: self.load_release()), ("Ctrl+E", self.open_sequence_editor),
+                          ("Ctrl+Shift+F", self._flash_all), ("Ctrl+F", lambda: self.flash(self.current_id)),
+                          ("Esc", self._stop)):
+            a = QAction(self)
+            a.setShortcut(QKeySequence(key))
+            a.triggered.connect(slot)
+            self.addAction(a)
 
-    # -- project -----------------------------------------------------------
-    def _choose_project(self) -> None:
-        start = os.path.dirname(self.project.path) if self.project else os.getcwd()
-        path, _ = QFileDialog.getOpenFileName(self, "Open flash project", start, "Flash projects (*.ftproj *.yaml)")
-        if path:
-            self.open_project(path)
+    @staticmethod
+    def _mono() -> QFont:
+        f = QFont("Menlo" if sys.platform == "darwin" else "Consolas" if sys.platform == "win32" else "Monospace")
+        f.setStyleHint(QFont.StyleHint.Monospace)
+        return f
 
-    def _reload(self) -> None:
-        if self.project:
-            self.open_project(self.project.path)
+    def show_page(self, name: str) -> None:
+        self.stack.setCurrentIndex(self.PAGES.index(name))
+        self.nav[name].setChecked(True)
+        if name == "reports":
+            self._refresh_reports()
+        if name == "trace" and self.current_id:
+            self._sync_trace_combo()
 
+    def toggle_theme(self) -> None:
+        dark = tokens()["bg"] == "#12161c"
+        self.theme_mode = "light" if dark else "dark"
+        self.settings.setValue("theme", self.theme_mode)
+        apply_theme(QApplication.instance(), self.theme_mode)
+        self._refresh_sidebar_icons()
+        for card in self.cards.values():
+            card.refresh_icons()
+        self.chart.update()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self.cards_scroll.viewport() and event.type() == QEvent.Type.Resize:
+            self._layout_cards()
+        return super().eventFilter(obj, event)
+
+    # ======================================================================== project
     def _project_dir(self) -> str:
         return os.path.dirname(self.project_path) if self.project_path else os.getcwd()
 
-    def open_project(self, path: str, select_row: int = 0) -> None:
+    def _update_title(self) -> None:
+        name = (self.raw.get("name", "") if self.raw else "") + ("  (sealed, read-only)" if self.sealed else "")
+        self.setWindowTitle(f"FlashTool {__version__}" + (f" – {name}{' *' if self.dirty else ''}" if name else ""))
+        self.project_title.setText(f"{name}{'  •' if self.dirty else ''}" if name else "No project open")
+        self.project_path_label.setText(self.project_path or "Open or create a project in the sidebar")
+
+    def _choose_project(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open flash project", self._project_dir(),
+                                              "Flash projects (*.ftproj *.yaml)")
+        if path:
+            self.open_project(path)
+
+    def open_project(self, path: str, select: str | None = None) -> None:
         if self.manager.running:
             QMessageBox.warning(self, "FlashTool", "Wait for the running jobs to finish before opening a project.")
             return
@@ -247,126 +468,107 @@ class MainWindow(QMainWindow):
             return
         raw.setdefault("targets", [])
         self.project, self.raw, self.project_path, self.dirty = project, raw, os.path.abspath(path), False
+        try:
+            from ..app.package import is_sealed
+
+            self.sealed = is_sealed(self.project_path)
+        except Exception:
+            self.sealed = False
         self.settings.setValue("last_project", project.path)
         self.states = {t.id: TargetState() for t in project.targets}
-        self._fill_table(select_row)
-        self.statusBar().showMessage(f"{project.path} – {len(project.targets)} ECU(s)")
+        self._rebuild_targets(select)
+        self.statusBar().showMessage("Sealed package: read-only, ready to flash" if self.sealed
+                                     else f"Opened {project.path}", 0 if self.sealed else 4000)
 
-    def _update_title(self) -> None:
-        name = self.raw.get("name", "") if self.raw else ""
-        self.setWindowTitle(f"FlashTool {__version__} – {name}{' *' if self.dirty else ''}")
-
-    def _fill_table(self, select_row: int = 0) -> None:
+    def _rebuild_targets(self, select: str | None = None) -> None:
+        """ECU list and cards from self.project (keeps the selection when possible)."""
         project = self.project
         assert project is not None
+        ids = [t.id for t in project.targets]
+        for tid in list(self.cards):
+            if tid not in ids:
+                self.cards.pop(tid).deleteLater()
+        for t in project.targets:
+            self.states.setdefault(t.id, TargetState())
+            card = self.cards.get(t.id)
+            if card is None:
+                card = EcuCard(t.id)
+                card.flash_clicked.connect(self.flash)
+                card.release_clicked.connect(self.load_release)
+                card.configure_clicked.connect(lambda tid: (self.select_target(tid), self.show_page("configure")))
+                card.report_clicked.connect(self._open_report)
+                card.files_dropped.connect(self.put_release)
+                card.selected.connect(self.select_target)
+                self.cards[t.id] = card
+            card.set_target(t)
+            card.set_state(self.states[t.id], t.id in self.manager.running)
+        self._layout_cards()
+        self.ecu_list.blockSignals(True)
+        self.ecu_list.clear()
+        for t in project.targets:
+            item = QListWidgetItem(f"{t.name}\n{BUS_LABEL.get(t.transport, t.transport)} · {t.id}")
+            item.setData(Qt.ItemDataRole.UserRole, t.id)
+            self.ecu_list.addItem(item)
+        self.ecu_list.blockSignals(False)
+        self._sync_trace_combo()
+        self.empty.setVisible(not ids)
+        self.cards_scroll.setVisible(bool(ids))
         self._update_title()
-        self.table.blockSignals(True)
-        self.table.setRowCount(len(project.targets))
-        self._bars.clear()
-        for row, t in enumerate(project.targets):
-            self._set_row(row, t)
-        self.table.blockSignals(False)
-        if project.targets:
-            self.table.selectRow(min(select_row, len(project.targets) - 1))
-            self._on_select()
+        self._update_summary()
+        target = select if select in ids else (self.current_id if self.current_id in ids else (ids[0] if ids else None))
+        self.current_id = None
+        if target:
+            self.select_target(target)
         else:
-            self._show_empty()
+            self.target_editor.setEnabled(False)
+            self.fw_editor.setEnabled(False)
+            self.seq_tree.clear()
         self._update_actions()
 
-    def _show_empty(self) -> None:
-        self.target_editor.setEnabled(False)
-        self.fw_editor.setEnabled(False)
-        self.seq_tree.clear()
-        QTreeWidgetItem(self.seq_tree, ["No ECU yet: use Add ECU in the toolbar"])
-
-    def _set_row(self, row: int, t) -> None:
-        label = f"{t.name}  [{t.id}]" + ("  (simulated)" if t.simulate else "")
-        self.table.setItem(row, self.C_ECU, QTableWidgetItem(label))
-        self.table.item(row, self.C_ECU).setData(Qt.ItemDataRole.UserRole, t.id)
-        self.table.setItem(row, self.C_BUS, QTableWidgetItem(self._transport_text(t)))
-        files = ", ".join(os.path.basename(f.file) + (f" [{f.session}]" if f.session else "") for f in t.firmware)
-        fw_item = QTableWidgetItem(files or "– drop a file here –")
-        fw_item.setToolTip("\n".join(f.file for f in t.firmware) or "No firmware yet")
-        self.table.setItem(row, self.C_FW, fw_item)
-        for col in (self.C_STATUS, self.C_SPEED, self.C_STEP):
-            if self.table.item(row, col) is None:
-                self.table.setItem(row, col, QTableWidgetItem(""))
-        bar = self.table.cellWidget(row, self.C_PROGRESS)
-        if not isinstance(bar, QProgressBar):
-            bar = QProgressBar()
-            bar.setRange(0, 1000)
-            bar.setFormat("%p%")
-            self.table.setCellWidget(row, self.C_PROGRESS, bar)
-        self._bars[t.id] = bar
-        self.states.setdefault(t.id, TargetState())
-        self._refresh_row(t.id)
-
-    @staticmethod
-    def _transport_text(t) -> str:
-        if t.can is not None:
-            c = t.can
-            rate = f"{c.bitrate // 1000}k" + (f"/{(c.data_bitrate or 0) // 1000}k" if c.fd else "")
-            return f"{'CAN FD' if c.fd else 'CAN'} {rate} {c.hardware.backend}:{c.hardware.channel}  STmin {c.stmin_rx}"
-        if t.lin is not None:
-            n = t.lin
-            return f"LIN {n.baudrate} {n.backend}:{n.channel} NAD 0x{n.nad:02X}  N_Cs {n.n_cs_ms}"
-        d = t.doip
-        return f"DoIP {d.ecu_ip}:{d.tcp_port} ECU 0x{d.ecu_address:04X}" if d else t.transport
-
-    def _selected_ids(self) -> list[str]:
-        rows = sorted({i.row() for i in self.table.selectedIndexes()})
-        return [self.table.item(r, self.C_ECU).data(Qt.ItemDataRole.UserRole) for r in rows]
-
-    def _on_select(self) -> None:
-        ids = self._selected_ids()
-        if not ids or not self.project:
+    def _layout_cards(self) -> None:
+        if not hasattr(self, "cards_grid"):
             return
-        target = self.project.target(ids[0])
-        raw_target = self._raw_target(target.id)
-        self.target_editor.setEnabled(not self.manager.running)
-        self.fw_editor.setEnabled(not self.manager.running)
+        width = self.cards_scroll.viewport().width()
+        columns = max(1, width // 520)
+        while self.cards_grid.count():
+            self.cards_grid.takeAt(0)
+        order = [t.id for t in self.project.targets] if self.project else []
+        for i, tid in enumerate(order):
+            if tid in self.cards:
+                self.cards_grid.addWidget(self.cards[tid], i // columns, i % columns)
+
+    def select_target(self, target_id: str | None) -> None:
+        if not target_id or self.project is None or target_id == self.current_id:
+            return
+        try:
+            target = self.project.target(target_id)
+        except ProjectError:
+            return
+        self.current_id = target_id
+        for tid, card in self.cards.items():
+            card.set_selected(tid == target_id)
+        for i in range(self.ecu_list.count()):
+            if self.ecu_list.item(i).data(Qt.ItemDataRole.UserRole) == target_id:
+                self.ecu_list.blockSignals(True)
+                self.ecu_list.setCurrentRow(i)
+                self.ecu_list.blockSignals(False)
+        raw_target = self._raw_target(target_id)
+        editable = not self.manager.running and not self.sealed
+        self.target_editor.setEnabled(editable)
+        self.fw_editor.setEnabled(editable)
         if raw_target is not None:
             self.target_editor.set_target(raw_target)
             self.fw_editor.set_entries(raw_target.setdefault("firmware", []))
         self._show_sequence(target)
         self._show_template(target)
-        self._show_trace(target.id)
+        self._sync_trace_combo()
         self._update_actions()
 
-    def _show_sequence(self, target) -> None:
-        self.seq_tree.clear()
-        self._step_items.clear()
-        try:
-            _, seq, warnings = prepare(self.project, target)
-        except JobSetupError as exc:
-            QTreeWidgetItem(self.seq_tree, ["Error", str(exc)])
-            return
-        root_title = f"{seq['name']}  ({' ← '.join(os.path.basename(s) for s in reversed(seq['sources']))})"
-        for section in ("steps", "finally"):
-            top = QTreeWidgetItem(self.seq_tree, [section if section == "finally" else root_title])
-            parents = {0: top}
-            for depth, step in flatten(seq[section]):
-                item = QTreeWidgetItem(parents[depth], [step.get("id", "?"), describe_step(step), "", ""])
-                parents[depth + 1] = item
-                self._step_items[step.get("id", "?")] = item
-            top.setExpanded(True)
-        self.seq_tree.expandAll()
-        self.seq_tree.resizeColumnToContents(0)
-        for sid, (status, info) in self.states[target.id].steps.items():
-            self._paint_step(sid, status, info)
-        for w in warnings:
-            QTreeWidgetItem(self.seq_tree, ["warning", w])
-
-    # -- visual editing ---------------------------------------------------------
     def _raw_target(self, target_id: str) -> dict | None:
         for t in (self.raw or {}).get("targets", []):
             if str(t.get("id")) == target_id:
                 return t
         return None
-
-    def _selected_row(self) -> int:
-        rows = sorted({i.row() for i in self.table.selectedIndexes()})
-        return rows[0] if rows else 0
 
     def _mark_dirty(self) -> None:
         self.dirty = True
@@ -374,30 +576,33 @@ class MainWindow(QMainWindow):
         self._apply_timer.start()
 
     def _apply_edits(self) -> None:
-        """Re-validate the edited project; refresh the table and the sequence preview."""
+        """Re-validate the edited project; refresh cards, list and sequence preview (editors keep their data)."""
         if self.raw is None or self.project_path is None:
             return
         try:
             project = project_from_data(self.raw, self.project_path)
         except Exception as exc:
-            self.statusBar().setStyleSheet(f"color: {STATUS_COLORS['failed']}")
             self.statusBar().showMessage(f"Project not valid yet: {exc}")
             return
-        self.statusBar().setStyleSheet("")
-        self.statusBar().showMessage("Unsaved changes – Ctrl+S to save" if self.dirty else "")
-        row = self._selected_row()
+        self.statusBar().showMessage("Unsaved changes – Ctrl+S to save" if self.dirty else "", 6000)
+        old_ids = [t.id for t in self.project.targets] if self.project else []
         self.project = project
-        # refresh the table without rebuilding the editors (they hold the dicts being edited)
-        self.table.blockSignals(True)
-        self.table.setRowCount(len(project.targets))
-        for r, t in enumerate(project.targets):
-            self._set_row(r, t)
-        self.table.selectRow(min(row, len(project.targets) - 1))
-        self.table.blockSignals(False)
-        ids = self._selected_ids()
-        if ids:
-            self._show_sequence(project.target(ids[0]))
-            self._show_template(project.target(ids[0]))
+        new_ids = [t.id for t in project.targets]
+        if old_ids != new_ids:  # ECU added, removed or renamed
+            selected = self.current_id if self.current_id in new_ids else None
+            if selected is None and self.current_id in old_ids and len(old_ids) == len(new_ids):
+                selected = new_ids[old_ids.index(self.current_id)]  # renamed
+            self.current_id = None
+            self._rebuild_targets(selected)
+            return
+        for t in project.targets:
+            self.cards[t.id].set_target(t)
+            item = self.ecu_list.item(new_ids.index(t.id))
+            item.setText(f"{t.name}\n{BUS_LABEL.get(t.transport, t.transport)} · {t.id}")
+        if self.current_id:
+            target = project.target(self.current_id)
+            self._show_sequence(target)
+            self._show_template(target)
         self._update_actions()
 
     def save_project(self) -> bool:
@@ -408,9 +613,8 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Project not saved", str(exc))
             return False
-        row = self._selected_row()
         self.dirty = False
-        self.open_project(self.project_path, select_row=row)
+        self.open_project(self.project_path, select=self.current_id)
         self._log(f"Saved {self.project_path}")
         return True
 
@@ -440,9 +644,9 @@ class MainWindow(QMainWindow):
         self.create_project(path)
 
     def create_project(self, path: str) -> None:
-        data = new_project(os.path.splitext(os.path.basename(path))[0])
-        save_project(data, path)
+        save_project(new_project(os.path.splitext(os.path.basename(path))[0]), path)
         self.dirty = False
+        self.current_id = None
         self.open_project(path)
 
     def add_target(self, bus: str = "can") -> None:
@@ -457,48 +661,41 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
         self._apply_timer.stop()
         self._apply_edits()
-        self.table.selectRow(len(self.raw["targets"]) - 1)
-        self._on_select()
+        self.select_target(f"ecu{n}")
+        self.show_page("configure")
         self.tabs.setCurrentWidget(self.target_editor)
 
     def remove_target(self) -> None:
-        ids = self._selected_ids()
-        if not ids or self.raw is None:
+        tid = self.current_id
+        if not tid or self.raw is None:
             return
-        if QMessageBox.question(self, "Remove ECU", f"Remove '{ids[0]}' from the project?") != QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Remove ECU", f"Remove '{tid}' from the project?") != QMessageBox.StandardButton.Yes:
             return
-        self.raw["targets"] = [t for t in self.raw["targets"] if str(t.get("id")) != ids[0]]
-        self._bars.pop(ids[0], None)
+        self.raw["targets"] = [t for t in self.raw["targets"] if str(t.get("id")) != tid]
+        self.current_id = None
         self._mark_dirty()
         self._apply_timer.stop()
         self._apply_edits()
-        if not self.raw["targets"]:
-            self.table.setRowCount(0)
-            self._show_empty()
-        else:
-            self._on_select()
 
-    def load_release(self) -> None:
-        ids = self._selected_ids()
-        if not ids or self.manager.running:
+    # ---------------------------------------------------------------- release files
+    def load_release(self, target_id: str | None = None) -> None:
+        tid = target_id or self.current_id
+        if not tid or self.manager.running:
             return
         paths, _ = QFileDialog.getOpenFileNames(
-            self, f"Release file(s) for {ids[0]}", self.settings.value("last_release_dir", self._project_dir()),
-            "Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx);;All files (*)")
+            self, f"Release file(s) for {tid}", str(self.settings.value("last_release_dir", self._project_dir())),
+            FIRMWARE_FILTER)
         if paths:
             self.settings.setValue("last_release_dir", os.path.dirname(paths[0]))
-            self.put_release(ids[0], paths)
-
-    def _drop_on_ecu(self, paths: list[str], row: int) -> None:
-        if row < 0 or self.manager.running or self.project is None:
-            return
-        self.table.selectRow(row)
-        self.put_release(self.table.item(row, self.C_ECU).data(Qt.ItemDataRole.UserRole), paths)
+            self.put_release(tid, paths)
 
     def put_release(self, target_id: str, paths: list[str]) -> None:
         """New release for an ECU: each file replaces the matching firmware entry (options kept) or is added."""
         raw_target = self._raw_target(target_id)
-        if raw_target is None or self.project is None:
+        if raw_target is None or self.project is None or self.manager.running:
+            return
+        if self.sealed:
+            QMessageBox.information(self, "Sealed package", "This project comes from a sealed package and is read-only.")
             return
         entries = raw_target.setdefault("firmware", [])
         for path in paths:
@@ -511,13 +708,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Release file", f"{os.path.basename(path)}: {exc}")
                 continue
             self._log(f"[{target_id}] {note}")
+            self.statusBar().showMessage(f"{target_id}: {note}", 8000)
         self.states[target_id] = TargetState()
         self._mark_dirty()
         self._apply_timer.stop()
         self._apply_edits()
-        if self._selected_ids() == [target_id]:
+        if self.current_id == target_id:
             self.fw_editor.set_entries(entries)
-            self.tabs.setCurrentWidget(self.fw_editor)
+        else:
+            self.select_target(target_id)
 
     def _entry_to_replace(self, target_id: str, entries: list, path: str) -> int | None:
         """None = add as a new file, -1 = cancelled, otherwise the index to replace."""
@@ -533,12 +732,57 @@ class MainWindow(QMainWindow):
         index = choices.index(choice)
         return None if index == len(entries) else index
 
+    # ---------------------------------------------------------------- packages
+    def _export_pack(self) -> None:
+        if not self.project_path:
+            return
+        if self.dirty and not self.save_project():
+            return
+        try:
+            from ..app import package
+        except ImportError as exc:
+            QMessageBox.warning(self, "Export package", f"Packages are not available: {exc}")
+            return
+        default = os.path.splitext(self.project_path)[0] + ".ftpack"
+        path, _ = QFileDialog.getSaveFileName(self, "Export project package", default, "FlashTool packages (*.ftpack)")
+        if not path:
+            return
+        sealed = QMessageBox.question(
+            self, "Export package", "Seal the package (read-only, any change is detected)?") == QMessageBox.StandardButton.Yes
+        try:
+            out = package.export_pack(self.project_path, path, sealed=sealed)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export package", str(exc))
+            return
+        self._log(f"Exported {out}")
+        self.statusBar().showMessage(f"Package written: {out}", 8000)
+
+    def _import_pack(self) -> None:
+        try:
+            from ..app import package
+        except ImportError as exc:
+            QMessageBox.warning(self, "Import package", f"Packages are not available: {exc}")
+            return
+        pack, _ = QFileDialog.getOpenFileName(self, "Import project package", self._project_dir(),
+                                              "FlashTool packages (*.ftpack)")
+        if not pack:
+            return
+        dest = QFileDialog.getExistingDirectory(self, "Empty folder to unpack into", os.path.dirname(pack))
+        if not dest:
+            return
+        try:
+            project_file = package.import_pack(pack, dest)
+        except Exception as exc:
+            QMessageBox.critical(self, "Import package", str(exc))
+            return
+        self.open_project(project_file)
+
+    # ---------------------------------------------------------------- sequence views
     def open_sequence_editor(self) -> None:
-        ids = self._selected_ids()
-        if not self.project or not ids:
+        if not self.project or not self.current_id:
             QMessageBox.information(self, "FlashTool", "Select an ECU first.")
             return
-        target = self.project.target(ids[0])
+        target = self.project.target(self.current_id)
         try:
             path = template_path(target.sequence, self.project.base_dir)
         except SequenceError:
@@ -563,12 +807,42 @@ class MainWindow(QMainWindow):
             if answer == QMessageBox.StandardButton.Yes:
                 raw_target["sequence"] = rel
                 self._mark_dirty()
-                if self._selected_ids() == [target_id]:
+                if self.current_id == target_id:
                     self.target_editor.set_target(raw_target)
                 return
         self._apply_edits()
 
-    # -- template editor ------------------------------------------------------
+    def _show_sequence(self, target) -> None:
+        self.seq_tree.clear()
+        self._step_items.clear()
+        try:
+            _, seq, warnings = prepare(self.project, target)
+        except JobSetupError as exc:
+            QTreeWidgetItem(self.seq_tree, ["Not ready", str(exc)])
+            return
+        root_title = f"{seq['name']}  ({' ← '.join(os.path.basename(s) for s in reversed(seq['sources']))})"
+        for section in ("steps", "finally"):
+            top = QTreeWidgetItem(self.seq_tree, [root_title if section == "steps" else "Always at the end"])
+            parents = {0: top}
+            for depth, step in flatten(seq[section]):
+                item = QTreeWidgetItem(parents[depth], [step.get("id", "?"), describe_step(step), "", ""])
+                parents[depth + 1] = item
+                self._step_items[step.get("id", "?")] = item
+        self.seq_tree.expandAll()
+        self.seq_tree.resizeColumnToContents(0)
+        for sid, (status, info) in self.states[target.id].steps.items():
+            self._paint_step(sid, status, info)
+        for w in warnings:
+            QTreeWidgetItem(self.seq_tree, ["warning", w])
+
+    def _paint_step(self, sid: str, status: str, info: str) -> None:
+        item = self._step_items.get(sid)
+        if item is None:
+            return
+        item.setText(2, status)
+        item.setText(3, info)
+        item.setForeground(2, QBrush(QColor(status_color(status))))
+
     def _show_template(self, target) -> None:
         try:
             path = template_path(target.sequence, self.project.base_dir)
@@ -596,18 +870,14 @@ class MainWindow(QMainWindow):
             with open(probe, "w", encoding="utf-8") as f:
                 f.write(self.tpl_edit.toPlainText())
             seq = load_sequence(probe, folder)
-        except (SequenceError, OSError) as exc:
-            self.tpl_status.setStyleSheet(f"color: {STATUS_COLORS['failed']}")
-            self.tpl_status.setText(f"Invalid: {exc}")
-            return False
-        except Exception as exc:  # YAML syntax errors and similar
-            self.tpl_status.setStyleSheet(f"color: {STATUS_COLORS['failed']}")
+        except Exception as exc:  # SequenceError, OSError, YAML syntax errors
+            self.tpl_status.setStyleSheet(f"color: {tokens()['fail']}")
             self.tpl_status.setText(f"Invalid: {exc}")
             return False
         finally:
             if os.path.exists(probe):
                 os.remove(probe)
-        self.tpl_status.setStyleSheet(f"color: {STATUS_COLORS['ok']}")
+        self.tpl_status.setStyleSheet(f"color: {tokens()['ok']}")
         self.tpl_status.setText(f"Valid: '{seq['name']}', {len(flatten(seq['steps']))} steps + "
                                 f"{len(flatten(seq['finally']))} final steps, catalogs: {len(seq['catalogs'])}")
         return True
@@ -618,7 +888,7 @@ class MainWindow(QMainWindow):
         with open(self._tpl_path, "w", encoding="utf-8") as f:
             f.write(self.tpl_edit.toPlainText())
         self._log(f"Saved {self._tpl_path}")
-        self._on_select()
+        self._apply_edits()
 
     def _derive_template(self) -> None:
         if not self.project or not self._tpl_path:
@@ -634,32 +904,37 @@ class MainWindow(QMainWindow):
         base = os.path.splitext(os.path.basename(self._tpl_path))[0] if is_builtin(self._tpl_path) \
             else os.path.relpath(self._tpl_path, self.project.base_dir)
         with open(path, "w", encoding="utf-8") as f:
-            f.write(f"name: {os.path.splitext(name)[0]}\nextends: {base}\n\nvariables: {{}}\n\npatch: []\n"
-                    "#  - replace: security\n#    with: {id: authenticate, authenticate: {}}\n")
-        QMessageBox.information(self, "FlashTool", f"Created {path}.\nSet 'sequence: {name.strip()}' on the target "
-                                                   "in the project file to use it.")
+            f.write(f"name: {os.path.splitext(name)[0]}\nextends: {base}\n\nvariables: {{}}\n\npatch: []\n")
+        QMessageBox.information(self, "FlashTool", f"Created {path}. Choose it as 'Sequence' in ECU settings.")
 
-    def _paint_step(self, sid: str, status: str, info: str) -> None:
-        item = self._step_items.get(sid)
-        if item is None:
+    # ---------------------------------------------------------------- trace
+    def _sync_trace_combo(self) -> None:
+        if self.project is None:
             return
-        item.setText(2, status)
-        item.setText(3, info)
-        color = STATUS_COLORS.get(status)
-        if color:
-            item.setForeground(2, QBrush(QColor(color)))
+        self.trace_ecu.blockSignals(True)
+        self.trace_ecu.clear()
+        for t in self.project.targets:
+            self.trace_ecu.addItem(t.name, t.id)
+        index = self.trace_ecu.findData(self.current_id)
+        self.trace_ecu.setCurrentIndex(max(index, 0))
+        self.trace_ecu.blockSignals(False)
+        self._show_trace(self.trace_ecu.currentData())
 
-    def _show_trace(self, target_id: str) -> None:
+    def _show_trace(self, target_id: str | None) -> None:
+        if not target_id or target_id not in self.states:
+            self.trace_view.clear()
+            return
         self.trace_view.setPlainText("\n".join(self.states[target_id].trace))
         self.trace_view.moveCursor(QTextCursor.MoveOperation.End)
 
-    # -- jobs --------------------------------------------------------------
+    # ======================================================================== jobs
+    def flash(self, target_id: str | None) -> None:
+        if target_id:
+            self._start([target_id])
+
     def _flash_all(self) -> None:
         if self.project:
             self._start([t.id for t in self.project.targets])
-
-    def _flash_selected(self) -> None:
-        self._start(self._selected_ids())
 
     def _start(self, ids: list[str]) -> None:
         if not self.project or not ids:
@@ -672,10 +947,11 @@ class MainWindow(QMainWindow):
             return
         for tid in ids:
             self.states[tid] = TargetState(status="starting")
-            self._refresh_row(tid)
-        self._on_select()
+        if self.current_id in ids:
+            self._show_sequence(self.project.target(self.current_id))
         self.manager.start(self.project.path, ids)
         self._log(f"Started {', '.join(ids)}")
+        self._refresh_cards(ids)
         self._update_actions()
 
     def _stop(self) -> None:
@@ -683,27 +959,31 @@ class MainWindow(QMainWindow):
             self.manager.cancel()
             self._log("Cancel requested; post-programming steps will still run")
 
-    def _open_report(self) -> None:
-        ids = self._selected_ids()
-        report = self.states[ids[0]].report if ids else None
+    def _open_report(self, target_id: str) -> None:
+        report = self.states.get(target_id, TargetState()).report
         if report:
             QDesktopServices.openUrl(QUrl.fromLocalFile(report.replace("report.json", "report.html")))
 
     def _pump_events(self) -> None:
         touched: set[str] = set()
+        finished = False
         for e in self.manager.poll(0.0):
             touched.add(e.job)
             self._handle(e)
+            finished = finished or isinstance(e, ev.JobFinished)
         if self._pending_trace:
-            selected = self._selected_ids()
-            lines = [line for tid, line in self._pending_trace if selected and tid == selected[0]]
+            shown = self.trace_ecu.currentData()
+            lines = [line for tid, line in self._pending_trace if tid == shown]
             if lines:
                 self.trace_view.appendPlainText("\n".join(lines))
             self._pending_trace.clear()
-        for tid in touched:
-            self._refresh_row(tid)
         if touched:
+            self._refresh_cards(touched)
             self._update_actions()
+        if finished:
+            self._update_summary()
+            if self.stack.currentIndex() == self.PAGES.index("reports"):
+                self._refresh_reports()
 
     def _handle(self, e: ev.Event) -> None:
         st = self.states.setdefault(e.job, TargetState())
@@ -714,12 +994,14 @@ class MainWindow(QMainWindow):
             st.current = e.label
             sid, info = _step_id(e.path)
             st.steps[sid] = ("running", info)
-            self._paint_if_selected(e.job, sid, "running", info)
+            if e.job == self.current_id:
+                self._paint_step(sid, "running", info)
         elif isinstance(e, ev.StepFinished):
             sid, info = _step_id(e.path)
             detail = info + (f"  {e.error}" if e.error else "")
             st.steps[sid] = (e.status, detail)
-            self._paint_if_selected(e.job, sid, e.status, detail)
+            if e.job == self.current_id:
+                self._paint_step(sid, e.status, detail)
             if e.status in ("failed", "warning"):
                 self._log(f"[{e.job}] {e.status}: {e.path} - {e.error}")
         elif isinstance(e, ev.Progress):
@@ -735,54 +1017,112 @@ class MainWindow(QMainWindow):
             self._log(f"[{e.job}] {e.level}: {e.message}")
         elif isinstance(e, ev.JobFinished):
             st.status = "passed" if e.success else "failed"
-            st.error, st.report, st.current = e.error, e.report, e.error or ""
+            st.error, st.report, st.current = e.error, e.report, ""
             self._log(f"[{e.job}] {'PASSED' if e.success else 'FAILED'} in {e.duration_s:.2f} s"
                       + (f" - {e.error}" if e.error else ""))
 
-    def _paint_if_selected(self, job: str, sid: str, status: str, info: str) -> None:
-        selected = self._selected_ids()
-        if selected and selected[0] == job:
-            self._paint_step(sid, status, info)
+    def _refresh_cards(self, ids) -> None:
+        running = set(self.manager.running)
+        for tid in ids:
+            if tid in self.cards and tid in self.states:
+                self.cards[tid].set_state(self.states[tid], tid in running)
+        self._update_summary()
 
-    def _refresh_row(self, tid: str) -> None:
+    def _update_summary(self) -> None:
         if not self.project:
+            self.summary.setText("")
             return
-        row = next((r for r in range(self.table.rowCount())
-                    if self.table.item(r, self.C_ECU).data(Qt.ItemDataRole.UserRole) == tid), None)
-        if row is None:
-            return
-        st = self.states[tid]
-        status_item = self.table.item(row, self.C_STATUS)
-        status_item.setText(st.status.upper() if st.status in ("passed", "failed") else st.status)
-        color = {"passed": STATUS_COLORS["ok"], "failed": STATUS_COLORS["failed"], "running": STATUS_COLORS["running"]}
-        status_item.setForeground(QBrush(QColor(color.get(st.status, "#5b6875"))))
-        self._bars[tid].setValue(int(1000 * st.done / st.total) if st.total else 0)
-        self.table.item(row, self.C_SPEED).setText(f"{st.speed / 1024:.1f} KB/s" if st.speed else "")
-        self.table.item(row, self.C_STEP).setText(st.current)
+        counts = {}
+        for t in self.project.targets:
+            s = self.states.get(t.id, TargetState()).status
+            counts[s] = counts.get(s, 0) + 1
+        parts = [f"{len(self.project.targets)} ECU(s)"]
+        for key, label in (("running", "flashing"), ("starting", "starting"), ("passed", "passed"), ("failed", "failed")):
+            if counts.get(key):
+                parts.append(f"{counts[key]} {label}")
+        self.summary.setText("   ·   ".join(parts) + "      Drop a release file on a card to replace its firmware.")
 
     def _update_actions(self) -> None:
         has_project = self.project is not None
         running = bool(self.manager.running)
-        self.act_flash_all.setEnabled(has_project and not running)
-        self.act_flash_sel.setEnabled(has_project and bool(self._selected_ids() if hasattr(self, "table") else []))
-        self.act_stop.setEnabled(running)
-        self.act_reload.setEnabled(has_project and not running)
-        for a in (self.act_new, self.act_open):
-            a.setEnabled(not running)
-        self.act_save.setEnabled(self.raw is not None and not running)
-        self.act_add.setEnabled(self.raw is not None and not running)
-        self.act_remove.setEnabled(has_project and not running and bool(self._selected_ids() if hasattr(self, "table") else []))
-        self.act_seq.setEnabled(has_project and bool(self._selected_ids() if hasattr(self, "table") else []))
-        self.act_release.setEnabled(has_project and not running and bool(self._selected_ids() if hasattr(self, "table") else []))
-        ids = self._selected_ids() if hasattr(self, "table") else []
-        self.act_report.setEnabled(bool(ids and self.states.get(ids[0]) and self.states[ids[0]].report))
+        has_targets = bool(self.project and self.project.targets)
+        self.flash_all_btn.setEnabled(has_targets and not running)
+        self.stop_btn.setEnabled(running)
+        for key in ("new", "open", "import"):
+            self.side_buttons[key].setEnabled(not running)
+        self.side_buttons["save"].setEnabled(self.raw is not None and not running and not self.sealed)
+        self.side_buttons["export"].setEnabled(has_project and not running)
+        editable = not running and not self.sealed
+        self.add_btn.setEnabled(self.raw is not None and editable)
+        self.remove_btn.setEnabled(bool(self.current_id) and editable)
+        self.release_btn.setEnabled(bool(self.current_id) and editable)
+        for card in self.cards.values():
+            card.release_btn.setVisible(not self.sealed)
+        self.seq_editor_btn.setEnabled(bool(self.current_id))
 
+    # ======================================================================== reports
+    def _refresh_reports(self) -> None:
+        self.runs.setRowCount(0)
+        self._run_paths = []
+        if not self.project:
+            return
+        rows = []
+        for path in glob.glob(os.path.join(self.project.output_dir, "*", "*", "report.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    r = json.load(f)
+            except (OSError, ValueError):
+                continue
+            rows.append((r.get("started", ""), path, r))
+        rows.sort(reverse=True)
+        self.runs.setRowCount(len(rows))
+        t = tokens()
+        for i, (started, path, r) in enumerate(rows):
+            ok = r.get("success")
+            values = [r.get("target", ""), started.replace("T", "  ")[:20], "PASSED" if ok else "FAILED",
+                      f"{r.get('duration_s', 0):.2f} s", str(r.get("firmware", {}).get("total_size", "")),
+                      (r.get("error") or "").splitlines()[0] if r.get("error") else ""]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 2:
+                    item.setForeground(QBrush(QColor(t["ok"] if ok else t["fail"])))
+                self.runs.setItem(i, col, item)
+            self._run_paths.append(path)
+        self.runs.resizeColumnsToContents()
+        self.chart.set_rows([])
+        self.run_info.setText(f"{len(rows)} run(s) in {self.project.output_dir}" if rows else "No runs yet")
+
+    def _selected_run(self) -> str | None:
+        rows = self.runs.selectionModel().selectedRows() if self.runs.selectionModel() else []
+        return self._run_paths[rows[0].row()] if rows and rows[0].row() < len(self._run_paths) else None
+
+    def _show_run(self) -> None:
+        path = self._selected_run()
+        if not path:
+            return
+        with open(path, encoding="utf-8") as f:
+            r = json.load(f)
+        steps = [s for s in r.get("steps", []) if "/" not in s["path"] or
+                 (s["path"].startswith("finally/") and s["path"].count("/") == 1)]
+        self.chart.set_rows([(s["path"].replace("finally/", "end: "), s["duration_s"], s["status"]) for s in steps])
+        total = r.get("firmware", {}).get("total_size", 0)
+        transfer = sum(s["duration_s"] for s in r.get("steps", []) if s["kind"] == "download")
+        speed = f", transfer {total / transfer / 1024:.1f} KB/s" if transfer else ""
+        self.run_info.setText(f"{r.get('target')}: {r.get('duration_s', 0):.2f} s total, {total} bytes{speed}. "
+                              f"Sequence '{r.get('sequence', {}).get('name', '')}'.")
+
+    def _open_selected_report(self) -> None:
+        path = self._selected_run()
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path.replace("report.json", "report.html")))
+
+    # ======================================================================== misc
     def _detect_hw(self) -> None:
         channels = list_channels()
         self.hw_list.setPlainText(
             "\n".join(", ".join(f"{k}={v}" for k, v in c.items()) for c in channels)
             or "No channels detected. Vector VN needs Windows with the Vector driver setup; "
-               "SocketCAN needs Linux. Simulated targets use the virtual bus."
+               "SocketCAN needs Linux. Simulated ECUs use the virtual bus."
         )
 
     def _log(self, text: str) -> None:

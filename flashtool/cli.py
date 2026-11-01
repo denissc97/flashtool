@@ -108,6 +108,9 @@ def cmd_inspect(args: argparse.Namespace) -> int:
               f"ALFID 0x{block.address_and_length_format:02X}, "
               f"memory_size {'-' if block.memory_size is None else block.memory_size}, "
               f"signature {'yes' if block.signature else 'no'}, CRC32 {block.crc32:08X}")
+        idents = block.metadata.get("own_idents")
+        if idents:  # part numbers / versions from the file (VBF header, ODX-F OWN-IDENTS)
+            print("  " + ", ".join(f"{k}={v}" for k, v in idents.items()))
         for seg in block.segments:
             print(f"  0x{seg.address:08X} - 0x{seg.end - 1:08X}  {len(seg.data):8d} bytes")
     issues = validate_image(image)
@@ -184,6 +187,62 @@ def cmd_audit_verify(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_pack(args: argparse.Namespace) -> int:
+    import os
+
+    from .app.package import PACK_EXT, PackageError, export_pack, read_manifest
+
+    out = args.output or os.path.splitext(args.project)[0] + PACK_EXT
+    try:
+        path = export_pack(args.project, out, sealed=args.sealed, include_private_keys=args.include_private_keys)
+        manifest = read_manifest(path)
+    except PackageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    size = sum(e["size"] for e in manifest["files"])
+    print(f"{path}: {len(manifest['files'])} file(s), {size} bytes{', SEALED' if manifest['sealed'] else ''}")
+    for e in manifest["files"]:
+        print(f"  {e['path']}  ({e['kind']}, {e['size']} bytes)")
+    for note in manifest["notes"]:
+        print(f"note: {note}")
+    return 0
+
+
+def cmd_unpack(args: argparse.Namespace) -> int:
+    from .app.package import PackageError, import_pack, read_manifest
+
+    try:
+        project = import_pack(args.pack, args.dest)
+        manifest = read_manifest(args.pack)
+    except PackageError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"project: {project}{' (sealed, read-only)' if manifest['sealed'] else ''}")
+    for note in manifest["notes"]:
+        print(f"note: {note}")
+    return 0
+
+
+def cmd_verify_pack(args: argparse.Namespace) -> int:
+    from .app.package import PackageError, read_manifest, verify_pack
+
+    problems = verify_pack(args.pack)
+    for p in problems:
+        print(f"FAIL: {p}")
+    if problems:
+        return 1
+    try:
+        manifest = read_manifest(args.pack)
+    except PackageError as exc:
+        print(f"FAIL: {exc}")
+        return 1
+    print(f"OK: {len(manifest['files'])} file(s) match the manifest - project '{manifest['project']['name']}', "
+          f"{manifest['tool']}, {manifest['created']}{', sealed' if manifest['sealed'] else ''}")
+    for e in manifest.get("excluded") or []:
+        print(f"note: {e['path']}: not in the pack ({e['kind']})")
+    return 0
+
+
 def cmd_gui(args: argparse.Namespace) -> int:
     try:
         from .gui.main_window import run
@@ -234,6 +293,23 @@ def build_parser() -> argparse.ArgumentParser:
     a = sub.add_parser("audit-verify", help="check the hash chain of an audit log")
     a.add_argument("file")
     a.set_defaults(func=cmd_audit_verify)
+
+    pk = sub.add_parser("pack", help="pack a project and every file it references into one .ftpack")
+    pk.add_argument("project")
+    pk.add_argument("-o", "--output", help="output .ftpack (default: next to the project)")
+    pk.add_argument("--sealed", action="store_true", help="read-only pack: any change fails verification")
+    pk.add_argument("--include-private-keys", action="store_true",
+                    help="also pack certificate private keys (left out by default)")
+    pk.set_defaults(func=cmd_pack)
+
+    up = sub.add_parser("unpack", help="verify a .ftpack and unpack it into a new or empty folder")
+    up.add_argument("pack")
+    up.add_argument("dest")
+    up.set_defaults(func=cmd_unpack)
+
+    vp = sub.add_parser("verify-pack", help="check a .ftpack (or an unpacked folder) against its manifest")
+    vp.add_argument("pack")
+    vp.set_defaults(func=cmd_verify_pack)
 
     g = sub.add_parser("gui", help="open the graphical interface")
     g.add_argument("project", nargs="?")

@@ -16,6 +16,23 @@ log = logging.getLogger(__name__)
 FD_DLC_SIZES = (8, 12, 16, 20, 24, 32, 48, 64)
 
 
+def cyclic_messages(entries: list, fd: bool) -> list[tuple[can.Message, float]]:
+    """(message, period in s) for the `cyclic` configuration, e.g. network management keeping the bus awake."""
+    out = []
+    for e in entries:
+        try:
+            data = bytes.fromhex(str(e.get("data", "")).replace(" ", ""))
+            period = float(e.get("period_ms", 100)) / 1000
+            msg = can.Message(arbitration_id=int(e["id"]), data=data, is_extended_id=bool(e.get("extended_id", False)),
+                              is_fd=fd and len(data) > 8)
+        except (KeyError, ValueError, TypeError) as exc:
+            raise TransportError(f"invalid cyclic message {e}: {exc}") from exc
+        if period <= 0:
+            raise TransportError(f"cyclic message 0x{int(e['id']):X}: period_ms must be > 0")
+        out.append((msg, period))
+    return out
+
+
 def _check_stmin(value: int) -> int:
     """STmin as the raw ISO 15765-2 byte: 0x00-0x7F = 0-127 ms, 0xF1-0xF9 = 100-900 us."""
     if not (0 <= value <= 0x7F or 0xF1 <= value <= 0xF9):
@@ -43,6 +60,7 @@ class CanTpConfig:
     wftmax: int = 0
     max_frame_size: int = 4095
     bus_log: str | None = None  # .blf / .asc / .log file with raw CAN traffic
+    cyclic: list = field(default_factory=list)  # [{id, data, period_ms, extended_id}] sent while connected
     hardware: CanHardware = field(default_factory=CanHardware)
 
     def validate(self) -> None:
@@ -77,6 +95,7 @@ class IsoTpCanTransport(Transport):
         self._notifier: can.Notifier | None = None
         self._stack: isotp.NotifierBasedCanStack | None = None
         self._bus_logger: can.Listener | None = None
+        self._cyclic_tasks: list = []
         self.last_error: Exception | None = None
 
     # -- lifecycle -------------------------------------------------------
@@ -114,8 +133,13 @@ class IsoTpCanTransport(Transport):
             self.bus, self._notifier, address=address, params=params, error_handler=self._on_error
         )
         self._stack.start()
+        if self._external_bus is None:  # on a shared bus the owner of the bus sends them once
+            self._cyclic_tasks = [self.bus.send_periodic(m, p) for m, p in cyclic_messages(c.cyclic, c.fd)]
 
     def close(self) -> None:
+        for task in self._cyclic_tasks:
+            task.stop()
+        self._cyclic_tasks = []
         if self._stack is not None:
             self._stack.stop()
             self._stack = None

@@ -45,7 +45,7 @@ root_package = "flashtool"
 name = "Layered architecture"
 type = "layers"
 layers = [
-    "flashtool.cli",  # entry point: also launches the GUI
+    "flashtool.cli | flashtool.api",  # entry points (the CLI also launches the GUI)
     "flashtool.gui",
     "flashtool.app",
     "flashtool.sequence",

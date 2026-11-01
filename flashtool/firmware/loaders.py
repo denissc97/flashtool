@@ -1,4 +1,4 @@
-"""Loaders for BIN / Intel HEX / Motorola S-record files and PDX / ODX-F containers."""
+"""Loaders for BIN / Intel HEX / Motorola S-record / VBF files and PDX / ODX-F containers."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ HEX_EXT = {".hex", ".ihex", ".ihx"}
 SREC_EXT = {".s19", ".s28", ".s37", ".srec", ".mot", ".sx"}
 BIN_EXT = {".bin", ".bin_"}
 ODX_EXT = {".pdx", ".odx-f", ".odx"}
+VBF_EXT = {".vbf"}
 
 
 class FirmwareError(Exception):
@@ -60,6 +61,8 @@ def detect_format(path: str) -> str:
         return "binary"
     if ext in ODX_EXT:
         return "odx"
+    if ext in VBF_EXT:
+        return "vbf"
     raise FirmwareError(f"Unsupported firmware file type '{ext}' ({path})")
 
 
@@ -76,7 +79,7 @@ def _read_segments(spec: FirmwareSpec, path: str) -> list[Segment]:
                 raise FirmwareError(f"{os.path.basename(path)}: .bin files need 'base_address'")
             bf.add_binary_file(path, address=spec.base_address)
         else:
-            raise FirmwareError(f"{os.path.basename(path)}: PDX/ODX-F files are loaded by load_firmware")
+            raise FirmwareError(f"{os.path.basename(path)}: {fmt} files are loaded by load_firmware")
     except FirmwareError:
         raise
     except Exception as exc:  # bincopy raises its own error types
@@ -110,6 +113,12 @@ def _odx_flash():
             raise
         raise FirmwareError(f"PDX/ODX-F loading needs the 'odxtools' package ({exc})") from exc
     return odx_flash
+
+
+def _vbf():
+    from . import vbf  # imports this module (FirmwareError, FirmwareSpec)
+
+    return vbf
 
 
 def odx_sessions(path: str) -> list:
@@ -153,13 +162,18 @@ def load_firmware(specs: list[FirmwareSpec], base_dir: str = ".") -> FirmwareIma
         path = spec.file if os.path.isabs(spec.file) else os.path.join(base_dir, spec.file)
         if not os.path.isfile(path):
             raise FirmwareError(f"Firmware file not found: {path}")
-        if detect_format(path) == "odx":
+        fmt = detect_format(path)
+        if fmt == "odx":
             odx_blocks, odx_sources = _load_odx(spec, path)
             blocks += odx_blocks
             sources += odx_sources
             continue
         if spec.session is not None:
             raise FirmwareError(f"{os.path.basename(path)}: 'session' only applies to PDX/ODX-F files")
+        if fmt == "vbf":
+            blocks += _vbf().load_vbf(spec, path)
+            sources.append(_source(path))
+            continue
         segs = _read_segments(spec, path)
         if not segs:
             raise FirmwareError(f"{os.path.basename(path)} contains no data")

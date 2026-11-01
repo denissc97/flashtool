@@ -76,6 +76,7 @@ class Engine:
         credentials: TargetCredentials | None = None,
         group: GroupSync | None = None,
         catalog: DiagCatalog | None = None,
+        allow_scripts: bool = False,
     ):
         self.job = job
         self.client = client
@@ -87,6 +88,7 @@ class Engine:
         self.credentials = credentials
         self.group = group
         self.catalog = catalog
+        self.allow_scripts = allow_scripts
         self.emit = emit
         self.cancel = cancel or CancelToken()
         self.tp = tester_present or TesterPresent(client, client.timing.tester_present_s)
@@ -455,5 +457,76 @@ class Engine:
         self.client.write_data_by_identifier(did, data, **self._req_kwargs(step))
         return {"did": f"{did:04X}", "data": data.hex(" ").upper()}
 
+    def _k_script(self, step, scope, path):
+        """Custom action: a function in a Python file, run only when the project allows custom actions."""
+        script = str(step["script"])
+        if not self.allow_scripts:
+            raise StepError(f"custom action {os.path.basename(script)} is blocked: set 'allow_custom_actions: true' "
+                            "on the target to run Python scripts from sequences")
+        if not os.path.isfile(script):
+            raise StepError(f"custom action not found: {script}")
+        import hashlib
+        import importlib.util
+
+        with open(script, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        spec = importlib.util.spec_from_file_location(f"flashtool_action_{digest[:12]}", script)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+            fn = getattr(module, str(step.get("function", "run")))
+        except Exception as exc:
+            raise StepError(f"cannot load custom action {os.path.basename(script)}: {exc}") from exc
+        args = {k: render_value(v, scope) for k, v in (step.get("args") or {}).items()}
+        ctx = ScriptContext(self, scope, args, self._req_kwargs(step))
+        try:
+            result = fn(ctx)
+        except (Cancelled, *RECOVERABLE):
+            raise
+        except Exception as exc:
+            raise StepError(f"{os.path.basename(script)}: {type(exc).__name__}: {exc}") from exc
+        detail = {"script": script, "sha256": digest}
+        if isinstance(result, dict):
+            detail["result"] = {k: (v.hex(" ").upper() if isinstance(v, (bytes, bytearray)) else v)
+                                for k, v in result.items()}
+        return detail
+
     def _k_log(self, step, scope, path):
         self._log("info", str(render_value(step["log"], scope)))
+
+
+class ScriptContext:
+    """What a custom action can do: UDS requests, DIDs, sequence variables, log, wait."""
+
+    def __init__(self, engine: Engine, scope: ChainMap, args: dict, request_kwargs: dict):
+        self._engine = engine
+        self._scope = scope
+        self._kw = request_kwargs
+        self.args = args
+        self.vars = engine.vars  # values stored here are visible to the following steps
+        self.image = engine.image
+        self.ecu = engine.job
+
+    def request(self, data: bytes | str, *, functional: bool = False, timeout_ms: int | None = None,
+                allow_nrc: tuple[int, ...] = ()) -> bytes | None:
+        payload = render_bytes(data, self._scope) if isinstance(data, str) else bytes(data)
+        kw = dict(self._kw, functional=functional, allow_nrc=tuple(allow_nrc))
+        if timeout_ms is not None:
+            kw["timeout_ms"] = timeout_ms
+        resp = self._engine.client.request(payload, **kw)
+        return resp.data if resp is not None else None
+
+    def read_did(self, did: int) -> bytes:
+        return self._engine.client.read_data_by_identifier(did)
+
+    def write_did(self, did: int, data: bytes) -> None:
+        self._engine.client.write_data_by_identifier(did, bytes(data))
+
+    def log(self, message: str) -> None:
+        self._engine._log("info", str(message))
+
+    def sleep(self, seconds: float) -> None:
+        self._engine._sleep(seconds)
+
+    def cancelled(self) -> bool:
+        return self._engine.cancel.is_set()
