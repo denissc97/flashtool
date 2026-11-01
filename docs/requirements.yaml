@@ -43,3 +43,6 @@ REQ-13:
 REQ-14:
   title: Templates cannot execute code (restricted expression language)
   verification: test
+REQ-15:
+  title: Several logical blocks per ECU from separate files; the block type (BOOT, APP, CAL, DATA, ...) selects its own block sequence
+  verification: test

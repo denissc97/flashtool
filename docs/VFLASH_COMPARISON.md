@@ -15,6 +15,7 @@ Legendă: ✅ există · 🟡 parțial · ❌ lipsește · — nu se aplică
 | Hardware | VN15xx/16xx/56xx/4610/5430/7572/76xx; PassThru și D-PDU API la cerere | 🟡 Vector XL (Windows), SocketCAN (Linux), simulator | J2534 și D-PDU API: nu (încă) |
 | **Formate** | Intel HEX, Motorola S, binar, ODX-F | ✅ toate patru, plus PDX | |
 | Formate OEM | „manufacturer-specific”, de exemplu JLR ODX-F→VBF și Bosch multi-datablock HEX | ✅ VBF (Volvo/Geely/JLR) · ❌ Bosch HEX + Memory Description File | |
+| Mai multe blocuri per ECU | flashware cu mai multe logical blocks, secvențe din template-ul OEM | ✅ un fișier per bloc sau mai multe blocuri dintr-un ODX-F/VBF; tipul (BOOT/APP/CAL/DATA) alege secvența blocului | Secvențele per tip le definești în template (`block_sequences`) |
 | Date comprimate/criptate | da | ✅ trimise ca atare, cu DFI/memorySize configurabile | La fel ca vFlash, tool-ul nu decomprimă |
 | Fișiere de lucru în dezvoltare | „referințe flexibile la flashware” | ✅ release nou prin drag & drop / Load release, cu opțiunile păstrate | |
 | **Template-uri OEM** | peste 250 de bootloadere OEM și Tier-1 | 🟡 template standard ISO 14229 + template-uri proprii (extends/patch) | Template-urile Vector se bazează pe specificații OEM confidențiale; le adaugi pe ale tale |

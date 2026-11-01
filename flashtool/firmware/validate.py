@@ -50,6 +50,14 @@ def validate_image(image: FirmwareImage) -> list[Issue]:
                                 f"DFI 0x{block.data_format_identifier:02X} (compressed/encrypted) without memory_size: "
                                 "0x34 will announce the transferred size"))
 
+    indexes: dict[int, str] = {}
+    for block in image.blocks:
+        if block.index is not None:
+            if block.index in indexes:
+                issues.append(Issue("error", block.name, f"logical block index {block.index} is also used by "
+                                                         f"{indexes[block.index]}"))
+            indexes.setdefault(block.index, block.name)
+
     regions = sorted(
         ((s.address, s.end, b.name) for b in image.blocks for s in b.segments), key=lambda r: r[0]
     )

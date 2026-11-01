@@ -12,7 +12,8 @@ def ids(steps):
 def test_builtin_standard_template():
     seq = load_sequence("uds_standard")
     assert ids(seq["steps"])[:3] == ["tester_present_on", "ext_session", "precondition_check"]
-    assert "download" in ids(seq["steps"])
+    assert "program" in ids(seq["steps"])
+    assert ids(seq["block_sequences"]["default"]) == ["erase", "erase_region", "download", "check_memory"]
     assert ids(seq["finally"])[-1] == "tester_present_off"
 
 
@@ -42,7 +43,7 @@ patch:
     assert order.index("security_oem") + 1 == order.index("fp")
     assert order.index("hello") + 1 == order.index("prog_session")
     assert seq["variables"]["security_level"] == 0x11
-    download = next(s for _, s in flatten(seq["steps"]) if s.get("id") == "download")
+    download = next(s for _, s in flatten(seq["block_sequences"]["default"]) if s.get("id") == "download")
     assert download["transport"] == {"stmin_rx": 0xF5}
     assert seq["name"] == "OEM" and len(seq["sources"]) == 2
 

@@ -50,6 +50,8 @@ class SimConfig:
     require_authentication: bool = False  # programming needs 0x29 instead of 0x27
     sleep_timeout_ms: int | None = None  # asleep until woken up; falls asleep again without keep-alive
     wakeup_id: int | None = None  # CAN id that wakes / keeps the ECU awake (None: any frame)
+    logical_blocks: list[tuple[int, int, int]] = field(default_factory=list)  # (index, address, size): erase by index
+    routines: list[int] = field(default_factory=list)  # extra routine ids answered "correct" (e.g. activate boot)
     vin: str = "WFLASHTOOLSIM0001"
     sw_version: str = "BOOT-1.0"
 
@@ -57,8 +59,9 @@ class SimConfig:
     def from_dict(cls, d: dict | None) -> SimConfig:
         d = dict(d or {})
         d["faults"] = [Fault(**f) for f in d.get("faults", [])]
-        if "memory" in d:
-            d["memory"] = [tuple(m) for m in d["memory"]]
+        for key in ("memory", "logical_blocks"):
+            if key in d:
+                d[key] = [tuple(m) for m in d[key]]
         return cls(**d)
 
 
@@ -277,8 +280,9 @@ class SimulatedEcu:
             return _nrc(0x31, 0x7F)
         if not self._access():
             return _nrc(0x31, 0x33 if not self.cfg.require_authentication else 0x34)
-        if rid == 0xFF00:  # erase memory: ALFID + address + size
-            parsed = self._parse_addr_size(req[4:])
+        if rid == 0xFF00:  # erase memory: ALFID + address + size, or a logical block index
+            by_index = {i: (a, n) for i, a, n in self.cfg.logical_blocks}
+            parsed = by_index.get(req[4]) if len(req) == 5 and by_index else self._parse_addr_size(req[4:])
             if parsed is None:
                 return _nrc(0x31, 0x13)
             address, size = parsed
@@ -302,6 +306,8 @@ class SimulatedEcu:
         if rid == 0xFF01:  # check programming dependencies
             ok = self._checks_ok > 0 and self._checks_failed == 0
             return [(0.0, head + (b"\x00" if ok else b"\x01"))]
+        if rid in self.cfg.routines:
+            return self._pending(0x31, self.cfg.check_time_ms, head + b"\x00")
         return _nrc(0x31, 0x31)
 
     # 0x34 RequestDownload

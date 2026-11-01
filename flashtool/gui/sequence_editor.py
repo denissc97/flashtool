@@ -16,11 +16,13 @@ from PySide6.QtWidgets import (
 
 from ..app.project_io import HexInt, save_sequence, sequence_for_editing, validate_sequence_data
 from ..diagdb.catalog import CatalogError, load_catalog
-from ..sequence.loader import BUILTIN_DIR, describe_step, is_builtin, step_kind
+from ..firmware.model import BLOCK_TYPES, normalize_block_type
+from ..sequence.loader import BUILTIN_DIR, DEFAULT_BLOCK_SEQUENCE, describe_step, is_builtin, step_kind
 from .forms import DictForm, F, Section
 
 ROLE = Qt.ItemDataRole.UserRole
-CONTAINER = "__container__"  # sections ("steps", "finally") and the else branch of an if
+CONTAINER = "__container__"  # sections ("steps", "block:<TYPE>", "finally") and the else branch of an if
+BLOCK = "block:"  # section prefix of a block sequence
 
 
 class _Ref:
@@ -45,6 +47,9 @@ STEP_TYPES = [
     ("request", "Raw request", "Any UDS request as hex bytes; ${expressions} allowed", {"request": "22 F1 90"}),
     ("service", "Catalog service", "Named service from an ODX-D / YAML catalog", {"service": ""}),
     ("download", "Download block", "0x34 / 0x36 x N / 0x37 for one firmware block", {"download": "block"}),
+    ("program_block", "Program block (by type)",
+     "Runs the block sequence of the block's type (BOOT, APP, CAL, DATA, ...), else the default one",
+     {"program_block": "block"}),
     ("foreach", "For each block", "Repeat the inner steps for every firmware block",
      {"foreach": "block", "in": "image.blocks", "steps": []}),
     ("if", "Condition", "Run the inner steps only when an expression is true", {"if": "True", "steps": []}),
@@ -62,6 +67,10 @@ STEP_TYPES = [
 TYPE_LABEL = {k: label for k, label, _, _ in STEP_TYPES}
 
 PRESETS = {
+    "Program every block by its type": {
+        "foreach": "block", "in": "image.blocks", "on_fail": "retry", "retries": 1, "steps": [
+            {"id": "program", "program_block": "block"},
+        ]},
     "Erase + download + check (all blocks)": {
         "foreach": "block", "in": "image.blocks", "on_fail": "retry", "retries": 1, "steps": [
             {"id": "erase", "request": "31 01 FF 00 ${addr_size(block.address_and_length_format, block.start, block.end - block.start)}",
@@ -103,6 +112,7 @@ KIND_FIELDS = {
     ],
     "request": [F("request", "Request", "bytes", tip="Hex bytes, e.g. 31 01 FF 00 ${u32(block.crc32)}")],
     "download": [F("download", "Block", "expr"), F("max_block_length", "Max block length", "int")],
+    "program_block": [F("program_block", "Block", "expr", tip="Usually 'block' inside 'For each block'")],
     "foreach": [F("foreach", "Loop variable"), F("in", "Over", "expr")],
     "if": [F("if", "Condition", "expr")],
     "tester_present": [F("tester_present", "Tester Present", "onoff")],
@@ -180,6 +190,18 @@ class SequenceEditor(QMainWindow):
         add.setMenu(add_menu)
         add.triggered.connect(lambda: self.add_step("request"))
         tb.addAction(add)
+        block_menu = QMenu(self)
+        for name in BLOCK_TYPES:
+            block_menu.addAction(f"For {name} blocks", lambda n=name: self.add_block_sequence(n))
+        block_menu.addAction("For another block type…", lambda: self.add_block_sequence(None))
+        block_menu.addSeparator()
+        block_menu.addAction("Default (every type without its own)",
+                             lambda: self.add_block_sequence(DEFAULT_BLOCK_SEQUENCE))
+        blocks = QAction("Block sequence", self)
+        blocks.setToolTip("Steps for one block type (BOOT, CAL, DATA, ...), run by 'Program block'")
+        blocks.setMenu(block_menu)
+        blocks.triggered.connect(lambda: self.add_block_sequence(None))
+        tb.addAction(blocks)
         act("Duplicate", self.duplicate, "Ctrl+D")
         act("Delete", self.delete, "Del")
         act("Move up", lambda: self.move(-1), "Alt+Up")
@@ -220,6 +242,15 @@ class SequenceEditor(QMainWindow):
         self.step_hint = QLabel("Select a step to edit it.")
         self.step_area.setWidget(self.step_hint)
         self.side.addTab(self.step_area, "Step")
+        self._block_panel = QWidget()
+        bp = QVBoxLayout(self._block_panel)
+        self._block_info = QLabel()
+        self._block_info.setWordWrap(True)
+        remove_block = QPushButton("Remove this block sequence")
+        remove_block.clicked.connect(lambda: self.remove_block_sequence())
+        bp.addWidget(self._block_info)
+        bp.addWidget(remove_block, 0, Qt.AlignmentFlag.AlignLeft)
+        bp.addStretch(1)
 
         self.var_table = QTableWidget(0, 2)
         self.var_table.setHorizontalHeaderLabels(["Variable", "Value"])
@@ -373,17 +404,88 @@ class SequenceEditor(QMainWindow):
         self.tree.clear()
         root = self.tree.invisibleRootItem()
         root.setFlags(root.flags() & ~Qt.ItemFlag.ItemIsDropEnabled)
-        for section, title in (("steps", "Steps"), ("finally", "Always at the end (also after errors)")):
-            top = QTreeWidgetItem(self.tree, [title])
-            top.setData(0, ROLE, _Ref({CONTAINER: section}))
-            top.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDropEnabled)
-            for step in self.data.get(section) or []:
+        blocks = sorted((self.data.get("block_sequences") or {}).items(), key=lambda kv: _block_order(kv[0]))
+        sections = [("steps", self.data.get("steps"))] + [(BLOCK + n, steps) for n, steps in blocks]
+        for section, steps in sections + [("finally", self.data.get("finally"))]:
+            top = self._section(section)
+            for step in steps or []:
                 self._add_item(top, step)
-            top.setExpanded(True)
         self.tree.expandAll()
         self.tree.resizeColumnToContents(0)
         self.tree.resizeColumnToContents(1)
         self._building = False
+
+    def _section(self, section: str, index: int | None = None) -> QTreeWidgetItem:
+        """Top-level item holding the steps of one section."""
+        if section.startswith(BLOCK):
+            name = section[len(BLOCK):]
+            texts = [f"Block sequence {name}", "",
+                     "for every block type without a sequence of its own" if name == DEFAULT_BLOCK_SEQUENCE
+                     else f"for blocks of type {name}"]
+        else:
+            texts = ["Steps" if section == "steps" else "Always at the end (also after errors)"]
+        top = QTreeWidgetItem(texts)
+        top.setData(0, ROLE, _Ref({CONTAINER: section}))
+        top.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDropEnabled)
+        if index is None:
+            self.tree.addTopLevelItem(top)
+        else:
+            self.tree.insertTopLevelItem(index, top)
+        top.setExpanded(True)
+        return top
+
+    def _section_item(self, section: str) -> QTreeWidgetItem | None:
+        for i in range(self.tree.topLevelItemCount()):
+            if _body(self.tree.topLevelItem(i)).get(CONTAINER) == section:
+                return self.tree.topLevelItem(i)
+        return None
+
+    def _block_names(self) -> list[str]:
+        names = [_body(self.tree.topLevelItem(i)).get(CONTAINER, "") for i in range(self.tree.topLevelItemCount())]
+        return [n[len(BLOCK):] for n in names if n.startswith(BLOCK)]
+
+    def add_block_sequence(self, name: str | None, copy_default: bool = True) -> QTreeWidgetItem | None:
+        """New section with the steps for one block type; starts as a copy of the default block sequence."""
+        if name is None:
+            name, ok = QInputDialog.getText(self, "Block sequence", "Block type (e.g. BOOT, CAL, DATA, SBL):")
+            if not ok or not name.strip():
+                return None
+        name = DEFAULT_BLOCK_SEQUENCE if name.strip().lower() == DEFAULT_BLOCK_SEQUENCE else normalize_block_type(name)
+        existing = self._section_item(BLOCK + name)
+        if existing is not None:
+            self.tree.setCurrentItem(existing)
+            return existing
+        steps: list[dict] = []
+        default = self._section_item(BLOCK + DEFAULT_BLOCK_SEQUENCE)
+        if copy_default and default is not None and name != DEFAULT_BLOCK_SEQUENCE:
+            steps = [self._build_step(default.child(j)) for j in range(default.childCount())]
+            used = self._used_ids()
+            for step in _walk(steps):
+                if "id" in step:
+                    step["id"] = _unique(f"{name.lower()}_{step['id']}", used)
+        index = 1 + sum(1 for n in self._block_names() if _block_order(n) < _block_order(name))
+        self._building = True
+        top = self._section(BLOCK + name, index)
+        for step in steps:
+            self._add_item(top, step)
+        self._building = False
+        self.tree.expandItem(top)
+        self.tree.setCurrentItem(top)
+        self._mark_dirty()
+        return top
+
+    def remove_block_sequence(self, item: QTreeWidgetItem | None = None, confirm: bool = True) -> None:
+        item = item or self._selected()
+        section = _body(item).get(CONTAINER, "") if item is not None else ""
+        if not section.startswith(BLOCK) or item.parent() is not None:
+            return
+        if confirm and item.childCount():
+            answer = QMessageBox.question(self, "Remove block sequence",
+                                          f"Remove the block sequence {section[len(BLOCK):]} and its steps?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(item))
+        self._mark_dirty()
 
     def _add_item(self, parent: QTreeWidgetItem, step: dict, index: int | None = None) -> QTreeWidgetItem:
         body = {k: v for k, v in step.items() if k not in ("steps", "else")}
@@ -442,12 +544,20 @@ class SequenceEditor(QMainWindow):
 
     def collect(self) -> dict:
         """Current sequence as data (tree is the source of truth for the steps)."""
-        data = {k: v for k, v in self.data.items() if k not in ("steps", "finally")}
+        data = {k: v for k, v in self.data.items() if k not in ("steps", "finally", "block_sequences")}
+        blocks = {}
         for i in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(i)
             section = _body(top)[CONTAINER]
-            data[section] = [self._build_step(top.child(j)) for j in range(top.childCount())]
-        ordered = {k: data[k] for k in ("name", "description", "catalog", "variables", "steps", "finally") if k in data}
+            steps = [self._build_step(top.child(j)) for j in range(top.childCount())]
+            if section.startswith(BLOCK):
+                blocks[section[len(BLOCK):]] = steps
+            else:
+                data[section] = steps
+        if blocks:
+            data["block_sequences"] = blocks
+        keys = ("name", "description", "catalog", "variables", "steps", "block_sequences", "finally")
+        ordered = {k: data[k] for k in keys if k in data}
         ordered.update({k: v for k, v in data.items() if k not in ordered})
         return ordered
 
@@ -456,7 +566,7 @@ class SequenceEditor(QMainWindow):
         items = self.tree.selectedItems()
         return items[0] if items else None
 
-    def _new_id(self, kind: str) -> str:
+    def _used_ids(self) -> set:
         used = set()
 
         def walk(item):
@@ -467,6 +577,10 @@ class SequenceEditor(QMainWindow):
                 walk(item.child(i))
 
         walk(self.tree.invisibleRootItem())
+        return used
+
+    def _new_id(self, kind: str) -> str:
+        used = self._used_ids()
         n = 1
         while f"{kind}_{n}" in used:
             n += 1
@@ -494,6 +608,11 @@ class SequenceEditor(QMainWindow):
     def add_preset(self, name: str) -> QTreeWidgetItem:
         step = copy.deepcopy(PRESETS[name])
         step["id"] = self._new_id("blocks")
+        used = self._used_ids() | {step["id"]}
+        for inner in _walk(step.get("steps") or []):  # ids are unique in the whole sequence
+            if inner.get("id") in used:
+                inner["id"] = _unique(inner["id"], used)
+            used.add(inner.get("id"))
         return self._insert(step)
 
     def _palette_add(self, item: QListWidgetItem) -> None:
@@ -522,6 +641,9 @@ class SequenceEditor(QMainWindow):
 
     def delete(self) -> None:
         sel = self._selected()
+        if sel is not None and sel.parent() is None and _body(sel).get(CONTAINER, "").startswith(BLOCK):
+            self.remove_block_sequence(sel)
+            return
         if sel is None or self._is_container(sel):
             return
         sel.parent().removeChild(sel)
@@ -545,6 +667,21 @@ class SequenceEditor(QMainWindow):
 
     def _on_select(self) -> None:
         sel = self._selected()
+        section = _body(sel).get(CONTAINER, "") if sel is not None else ""
+        if sel is not None and sel.parent() is None and section.startswith(BLOCK):
+            name = section[len(BLOCK):]
+            who = ("every block whose type has no block sequence of its own" if name == DEFAULT_BLOCK_SEQUENCE
+                   else f"every firmware block of type {name}")
+            self._block_info.setText(
+                f"<b>Block sequence {name}</b><br>Runs for {who}, when the main steps reach a "
+                "<i>Program block</i> step (normally inside <i>For each block</i>). The block is available "
+                "as <code>block</code>: block.start, block.end, block.crc32, block.index, block.type.<br><br>"
+                "The block type is set per file in the Firmware tab of the ECU, or comes from the file "
+                "(ODX-F, VBF). Drag steps here or add them from the palette.")
+            if self.step_area.widget() is not self._block_panel:
+                self.step_area.takeWidget()
+                self.step_area.setWidget(self._block_panel)
+            return
         if sel is None or self._is_container(sel):
             self.step_area.takeWidget()
             self.step_hint = QLabel("Select a step to edit it, or add one from the palette.")
@@ -691,7 +828,20 @@ class SequenceEditor(QMainWindow):
             self._set_status(f"Invalid: {exc}", "failed")
             return False
         n_steps = sum(1 for _ in _walk(seq["steps"]))
-        self._set_status(f"Valid: {n_steps} steps, {sum(1 for _ in _walk(seq['finally']))} final steps", "ok")
+        blocks = seq.get("block_sequences") or {}
+        text = f"Valid: {n_steps} steps"
+        if blocks:
+            text += f", block sequences {', '.join(blocks)} ({sum(1 for v in blocks.values() for _ in _walk(v))} steps)"
+        text += f", {sum(1 for _ in _walk(seq['finally']))} final steps"
+        programs = any("program_block" in s for s in _walk(seq["steps"] + seq["finally"]))
+        if blocks and not programs:
+            self._set_status(text + ". The block sequences are not used: add a 'Program block' step "
+                             "(preset 'Program every block by its type').", "warning")
+        elif programs and not blocks:
+            self._set_status(text + ". 'Program block' needs a block sequence: add one with 'Block sequence'.",
+                             "warning")
+        else:
+            self._set_status(text, "ok")
         return True
 
     def _set_status(self, text: str, kind: str) -> None:
@@ -704,6 +854,22 @@ def _walk(steps: list):
     for s in steps:
         yield s
         yield from _walk((s.get("steps") or []) + (s.get("else") or []))
+
+
+def _block_order(name: str) -> tuple:
+    """default first, then BOOT, APP, CAL, DATA, then other types alphabetically."""
+    order = [DEFAULT_BLOCK_SEQUENCE, *BLOCK_TYPES]
+    return (order.index(name) if name in order else len(order), name)
+
+
+def _unique(base: str, used: set) -> str:
+    """`base`, or base_2, base_3, ... - whichever is free; the result is added to `used`."""
+    name, n = base, 1
+    while name in used:
+        n += 1
+        name = f"{base}_{n}"
+    used.add(name)
+    return name
 
 
 def _file_name(name: str) -> str:

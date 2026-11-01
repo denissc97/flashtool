@@ -52,18 +52,8 @@ steps:
     on_fail: retry
     retries: 1
     steps:
-      - id: erase
-        foreach: region
-        in: block.effective_erase_ranges
-        steps:
-          - id: erase_region
-            request: "31 01 ${u16(erase_rid)} ${addr_size(block.address_and_length_format, region[0], region[1])}"
-            expect_data: "71 01 ${u16(erase_rid)} ${u8(routine_ok)}"
-      - id: download
-        download: block
-      - id: check_memory
-        request: "31 01 ${u16(check_memory_rid)} ${u32(block.crc32)}"
-        expect_data: "71 01 ${u16(check_memory_rid)} ${u8(routine_ok)}"
+      - id: program
+        program_block: block      # runs block_sequences[block.type], else block_sequences.default
   - id: check_dependencies
     request: "31 01 ${u16(check_dependencies_rid)}"
     expect_data: "71 01 ${u16(check_dependencies_rid)} ${u8(routine_ok)}"
@@ -71,6 +61,25 @@ steps:
     reset: 0x01
   - id: wait_after_reset
     wait_ecu: { timeout_ms: 5000 }
+
+# --- programming of one block, per block type ----------------------------
+# The type comes from the project (firmware entry 'type') or from the file (ODX-F
+# DATABLOCK TYPE, VBF sw_part_type); plain files default to APP. OEM templates add
+# their own sequences, e.g. BOOT: [...], CAL: [...], DATA: [...].
+block_sequences:
+  default:
+    - id: erase
+      foreach: region
+      in: block.effective_erase_ranges
+      steps:
+        - id: erase_region
+          request: "31 01 ${u16(erase_rid)} ${addr_size(block.address_and_length_format, region[0], region[1])}"
+          expect_data: "71 01 ${u16(erase_rid)} ${u8(routine_ok)}"
+    - id: download
+      download: block
+    - id: check_memory
+      request: "31 01 ${u16(check_memory_rid)} ${u32(block.crc32)}"
+      expect_data: "71 01 ${u16(check_memory_rid)} ${u8(routine_ok)}"
 
 # --- post-programming: always runs, also after a failure ---------------
 finally:

@@ -30,7 +30,7 @@ from ..sequence.engine import CancelToken, Engine
 from ..sequence.events import Emit, JobFinished, JobStarted, LogEvent, Traffic
 from ..sequence.expr import ExprError, render_value
 from ..sequence.group import GroupSync
-from ..sequence.loader import SequenceError, flatten, load_sequence
+from ..sequence.loader import SequenceError, all_steps, block_sequence_key, load_sequence
 from ..sim.ecu import SimConfig, SimulatedEcu
 from ..transport.base import Transport, TransportError
 from ..transport.doip import DoIpTransport
@@ -69,6 +69,7 @@ def prepare(project: Project, target: Target) -> tuple[FirmwareImage, dict, list
         raise JobSetupError(str(exc)) from exc
     sequence["variables"].update(target.variables)
     sequence["catalog"] = _load_catalogs(sequence, target, project.base_dir)
+    warnings += _check_block_sequences(image, sequence)
     if target.can is not None and target.can.stmin_tx_override_ms is not None:
         warnings.append(
             f"stmin_tx_override_ms={target.can.stmin_tx_override_ms}: the ECU's STmin is ignored "
@@ -77,9 +78,27 @@ def prepare(project: Project, target: Target) -> tuple[FirmwareImage, dict, list
     return image, sequence, warnings
 
 
+def _check_block_sequences(image: FirmwareImage, sequence: dict) -> list[str]:
+    """Every block must have a block sequence when the template programs blocks by type."""
+    if not any("program_block" in s for s in all_steps(sequence)):
+        defined = sorted(sequence.get("block_sequences") or {})
+        return [f"block sequences {', '.join(defined)} are not used: the sequence has no 'Program block' step"] \
+            if defined else []
+    warnings = []
+    for block in image.blocks:
+        key = block_sequence_key(sequence, block.type)
+        if key is None:
+            raise JobSetupError(f"block {block.name} has type {block.type}, but the sequence has no block sequence "
+                                f"for {block.type} and no default one")
+        if not sequence["block_sequences"][key]:
+            warnings.append(f"block {block.name} (type {block.type}): block sequence '{key}' is empty, "
+                            "nothing is downloaded for it")
+    return warnings
+
+
 def _load_catalogs(sequence: dict, target: Target, base_dir: str) -> DiagCatalog | None:
     refs = list(sequence.get("catalogs") or []) + list(target.catalog)
-    used = [s["service"] for _, s in flatten(sequence["steps"] + sequence["finally"]) if "service" in s]
+    used = [s["service"] for s in all_steps(sequence) if "service" in s]
     if not refs:
         if used:
             raise JobSetupError(f"sequence uses named services ({', '.join(used)}) but no catalog is configured")

@@ -18,7 +18,7 @@ from ..uds.tester_present import TesterPresent
 from .events import Emit, LogEvent, Progress, StepFinished, StepStarted
 from .expr import ExprError, evaluate, render_bytes, render_value
 from .group import GroupError, GroupSync
-from .loader import step_kind
+from .loader import block_sequence_key, step_kind
 
 
 class StepError(Exception):
@@ -93,12 +93,14 @@ class Engine:
         self.cancel = cancel or CancelToken()
         self.tp = tester_present or TesterPresent(client, client.timing.tester_present_s)
         self.records: list[StepRecord] = []
+        self._sequence: dict = {}
         self._done_by_block: dict[str, int] = {}
         self._t_transfer0: float | None = None
 
     # -- entry point -----------------------------------------------------
     def run(self, sequence: dict) -> tuple[bool, str | None]:
         error: str | None = None
+        self._sequence = sequence
         try:
             self._run_steps(sequence["steps"], ChainMap({}, self.vars), "")
         except StepFailed as exc:
@@ -254,6 +256,8 @@ class Engine:
         value = step.get(kind)
         if kind in ("foreach",):
             return f"foreach {value} in {step.get('in')}"
+        if kind == "program_block":
+            return f"program {value} (sequence by block type)"
         if kind == "if":
             return f"if {value}"
         if isinstance(value, (dict, list)):
@@ -372,6 +376,18 @@ class Engine:
                 self._progress(block)
             self.client.request_transfer_exit(**kw)
         return {"block": block.name, "bytes": block.size, "regions": len(regions)}
+
+    def _k_program_block(self, step, scope, path):
+        """Runs the block sequence of the block's type (BOOT, CAL, ...), else the default one."""
+        block = self._eval(step["program_block"], scope)
+        if not isinstance(block, LogicalBlock):
+            raise StepError(f"program_block expects a firmware block, got {type(block).__name__}")
+        key = block_sequence_key(self._sequence, block.type)
+        if key is None:
+            raise StepError(f"no block sequence for {block.name} (type {block.type}) and no default one")
+        self._log("info", f"Block {block.name} (type {block.type}): block sequence '{key}'")
+        self._run_steps(self._sequence["block_sequences"][key], scope.new_child({"block": block}), f"{path}[{key}]")
+        return {"block": block.name, "type": block.type, "sequence": key}
 
     def _progress(self, block: LogicalBlock) -> None:
         done = sum(self._done_by_block.values())

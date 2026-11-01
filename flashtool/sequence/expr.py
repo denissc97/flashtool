@@ -14,7 +14,7 @@ import zlib
 from collections.abc import Mapping
 from typing import Any
 
-from ..firmware.model import FirmwareImage, LogicalBlock, Segment, SourceFile
+from ..firmware.model import FirmwareImage, LogicalBlock, Segment, SourceFile, normalize_block_type
 from ..uds.client import encode_address_and_size
 
 
@@ -53,6 +53,12 @@ def _date_bcd() -> bytes:
     return bytes(int(f"{v:02d}", 16) for v in (d.year % 100, d.month, d.day))
 
 
+def _of_type(blocks: Any, *types: str) -> list:
+    """Blocks of the given type(s), e.g. of_type(image.blocks, 'BOOT')."""
+    wanted = {normalize_block_type(t) for t in types}
+    return [b for b in blocks if getattr(b, "type", None) in wanted]
+
+
 def _to_int(b: Any) -> int:
     if isinstance(b, (bytes, bytearray)):
         return int.from_bytes(b, "big")
@@ -75,6 +81,7 @@ FUNCTIONS: dict[str, Any] = {
     "crc32": lambda b: zlib.crc32(bytes(b)) & 0xFFFFFFFF,
     "addr_size": lambda alfid, address, size: encode_address_and_size(int(alfid), int(address), int(size)),
     "date_bcd": _date_bcd,
+    "of_type": _of_type,
     "str": str,
 }
 

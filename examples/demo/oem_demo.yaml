@@ -5,6 +5,7 @@ catalog: [demo_ecu.odx-d, demo_catalog.yaml]   # named services: ODX-D + hand-wr
 
 variables:
   security_level: 0x01
+  activate_boot_rid: 0xFF02
   fingerprint: "${date_bcd() + u16(0x1234) + hexbytes('000000000000')}"   # YYMMDD + tester id + 6 bytes
 
 patch:
@@ -31,3 +32,42 @@ patch:
 
   # This OEM does not use the precondition routine.
   - remove: precondition_check
+
+# Each block is programmed by the sequence of its type (firmware entry 'type' in the project);
+# APP and every other type use 'default' from uds_standard (erase by address, download, check).
+block_sequences:
+  # Bootloader update: the old bootloader activates the new one, then the ECU restarts and
+  # has to be unlocked again before the remaining blocks.
+  BOOT:
+    - id: boot_erase
+      request: "31 01 ${u16(erase_rid)} ${addr_size(block.address_and_length_format, block.start, block.end - block.start)}"
+      expect_data: "71 01 ${u16(erase_rid)} ${u8(routine_ok)}"
+    - id: boot_download
+      download: block
+    - id: boot_check
+      request: "31 01 ${u16(check_memory_rid)} ${u32(block.crc32)}"
+      expect_data: "71 01 ${u16(check_memory_rid)} ${u8(routine_ok)}"
+    - id: boot_activate
+      request: "31 01 ${u16(activate_boot_rid)}"
+      expect_data: "71 01 ${u16(activate_boot_rid)} ${u8(routine_ok)}"
+    - id: boot_reset
+      reset: 0x01
+    - id: boot_wait
+      wait_ecu: { timeout_ms: 5000 }
+    - id: boot_ext_session
+      session: 0x03
+    - id: boot_prog_session
+      session: 0x02
+    - id: boot_security
+      security: { level: "${security_level}" }
+
+  # Calibration: erased by logical block number (block_index in the project), not by address.
+  CAL:
+    - id: cal_erase
+      request: "31 01 ${u16(erase_rid)} ${u8(block.index)}"
+      expect_data: "71 01 ${u16(erase_rid)} ${u8(routine_ok)}"
+    - id: cal_download
+      download: block
+    - id: cal_check
+      request: "31 01 ${u16(check_memory_rid)} ${u32(block.crc32)}"
+      expect_data: "71 01 ${u16(check_memory_rid)} ${u8(routine_ok)}"

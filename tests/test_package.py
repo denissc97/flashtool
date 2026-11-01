@@ -118,7 +118,7 @@ def test_demo_project_round_trip(demo_copy, tmp_path):
     manifest = read_manifest(pack)
     kinds = {e["path"]: e["kind"] for e in manifest["files"]}
     assert kinds == {
-        "demo.ftproj": "project", "app.hex": "firmware", "cal.s19": "firmware", "body_sw.pdx": "firmware",
+        "demo.ftproj": "project", "boot.hex": "firmware", "app.hex": "firmware", "cal.s19": "firmware", "body_sw.pdx": "firmware",
         "gateway.bin": "firmware", "seat_sw.vbf": "firmware", "oem_demo.yaml": "sequence", "oem_cert.yaml": "sequence",
         "demo_ecu.odx-d": "catalog", "demo_catalog.yaml": "catalog", "seedkey_demo.py": "seed_key",
         "pki/tester.pem": "certificate", "pki/tester.key": "private_key", "pki/root_ca.pem": "trust_anchor",
@@ -302,7 +302,7 @@ def test_cli_pack_unpack_verify(demo_copy, tmp_path, capsys):
     text = capsys.readouterr().out
     assert "SEALED" in text and "note: pki/tester.key: private key not included" in text
     assert main(["verify-pack", out]) == 0
-    assert "OK: 13 file(s) match the manifest" in capsys.readouterr().out
+    assert "OK: 14 file(s) match the manifest" in capsys.readouterr().out
     assert main(["unpack", out, str(tmp_path / "u")]) == 0
     assert "(sealed, read-only)" in capsys.readouterr().out
     assert main(["unpack", out, str(tmp_path / "u")]) == 2

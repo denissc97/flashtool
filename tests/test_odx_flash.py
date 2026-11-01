@@ -463,5 +463,5 @@ def test_cli_inspect(tmp_path, rand, capsys):
     out, _ = capsys.readouterr()
     assert "* SES_ALL" in out
     assert "block BOOT [BOOT]: 0x00000000 - 0x0000001F, 32 bytes, DFI 0x00" in out
-    assert "block APP [CODE]: 0x00008000" in out
+    assert "block APP [APP (CODE)]: 0x00008000" in out
     assert "DFI 0x11, ALFID 0x44, memory_size 512, signature yes" in out

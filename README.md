@@ -83,6 +83,7 @@ Comparația completă cu Vector vFlash este în [docs/VFLASH_COMPARISON.md](docs
 | **Custom actions** (ca Custom Actions VDS) | Pasul „Custom action (Python)” din editorul de secvențe apelează `run(ctx)` dintr-un fișier `.py`. `ctx` oferă `request`, `read_did`, `write_did`, `vars`, `log`, `sleep` și `args`. Pasul rulează doar dacă ECU-ul are **Allow custom actions** bifat. |
 | **Mesaje CAN ciclice** | În ECU settings, câmpul Cyclic messages, de exemplu `0x500=00 01 @100`: mesajul se trimite la fiecare 100 ms cât durează flash-ul (network management, keep-alive). Din ECU tools îl pornești sau îl oprești manual. |
 | **Wake-up** | În ECU settings → Wake-up and identification: frame-urile de trezire, câte repetări, cât se așteaptă după, și opțional **Wake up before every flash**. |
+| **Mai multe logical blocks, secvență per tip** | Un ECU poate avea mai multe fișiere, fiecare cu **Block type** (BOOT, APP, CAL, DATA sau un tip propriu) și opțional **Logical block index**. Fișierele se flash-uiesc în ordinea din tabul Firmware. Pentru fiecare block rulează **block sequence**-ul tipului lui, iar tipurile fără secvență proprie folosesc `default`. Detalii mai jos, la [Block-uri de tip BOOT, CAL, DATA](#block-uri-de-tip-boot-cal-data). |
 | **Release folder** | În tabul Firmware, per fișier: **Release folder** (de exemplu share-ul unde ajung build-urile) și **File name filter** (de exemplu `app_*.hex`) pentru selectorul de pe card. Fără ele se folosește folderul fișierului curent. |
 | **API Python** | `from flashtool import api; api.flash("proiect.ftproj", on_event=print)`, pentru CI/CD și bancuri de test. |
 
@@ -91,7 +92,7 @@ Comparația completă cu Vector vFlash este în [docs/VFLASH_COMPARISON.md](docs
 Vezi [examples/demo/demo.ftproj](examples/demo/demo.ftproj). Pentru fiecare target configurezi:
 
 - **transport**: `can`, `canfd`, `lin` (NAD, `n_cs_ms`, `poll_interval_ms`) sau `doip`, cu ID-uri, padding, `tx_dl`, `stmin_rx`, `block_size` și opțional `stmin_tx_override_ms` (abatere de la ISO 15765-2, marcată în raport);
-- **firmware**: hex/s19/bin, `.vbf` sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
+- **firmware**: hex/s19/bin, `.vbf` sau `.pdx`/`.odx-f` (cu `session:` când are mai multe sesiuni ODX-F); per fișier, `type` (BOOT / APP / CAL / DATA / …), `block_index`, plus `dfi`, `alfid`, `memory_address`, `memory_size` și `erase` pentru fișierele deja comprimate/criptate;
 - **sequence**: `uds_standard` sau un template propriu care face `extends` și `patch` (vezi [examples/demo/oem_demo.yaml](examples/demo/oem_demo.yaml));
 - **seed_key**: provider `python`, `library` (DLL/.so cu `GenerateKeyEx`/`GenerateKeyExOpt`) sau `bridge` (DLL pe 32 de biți încărcat de un interpretor de 32 de biți).
 
@@ -99,6 +100,42 @@ Vezi [examples/demo/demo.ftproj](examples/demo/demo.ftproj). Pentru fiecare targ
 - **catalog**: servicii numite din ODX-D/PDX sau dintr-un YAML, folosite în template-uri ca `service: Fingerprint_Write`.
 
 Target-urile care au același `can.backend` + `can.channel` formează un **grup de bus**: rulează în același proces, iar pașii marcați `group: once` (10 03, 85 02, 28 03 și cei de final) se trimit o singură dată pentru tot bus-ul, după ce toate ECU-urile au ajuns la ei.
+
+### Block-uri de tip BOOT, CAL, DATA
+
+Fiecare block are un tip:
+- **tipul din proiect**, dacă e setat (`type: CAL`);
+- altfel, **tipul din fișier**: `TYPE` din DATABLOCK-ul ODX-F, `sw_part_type` din VBF;
+- altfel **APP**.
+
+Numele uzuale se recunosc: `CODE`/`EXE` → APP, `FBL`/`BOOTLOADER` → BOOT, `CALIBRATION` → CAL. Când adaugi un `.hex`/`.s19`/`.bin` din interfață, tipul e propus din numele fișierului (`fbl_v3.hex` → BOOT, `cal.s19` → CAL), iar tu îl poți schimba.
+
+Template-ul are câte o listă de pași pentru fiecare tip, în `block_sequences`. Pasul `program_block` (în editor: **Program block (by type)**) rulează lista tipului blocului curent:
+
+```yaml
+extends: uds_standard        # are deja block_sequences.default: erase, download, check memory
+block_sequences:
+  BOOT:                      # bootloader update: activare, reset, deblocare din nou
+    - { id: boot_erase, request: "31 01 FF 00 ${addr_size(0x44, block.start, block.size)}" }
+    - { id: boot_download, download: block }
+    - { id: boot_activate, request: "31 01 FF 02" }
+    - { id: boot_reset, reset: 0x01 }
+    - { id: boot_wait, wait_ecu: { timeout_ms: 5000 } }
+    - { id: boot_ext, session: 0x03 }
+    - { id: boot_prog, session: 0x02 }
+    - { id: boot_security, security: { level: 0x01 } }
+  CAL:                       # erase după numărul blocului (block_index din proiect)
+    - { id: cal_erase, request: "31 01 FF 00 ${u8(block.index)}" }
+    - { id: cal_download, download: block }
+  DATA: null                 # null: DATA folosește din nou secvența default
+```
+
+- În template-urile care fac `extends`, o listă înlocuiește lista moștenită pentru acel tip. `null` o șterge.
+- `patch` găsește pașii și în block sequences, după `id`.
+- În expresii ai `block.type`, `block.index`, `image.types` și `of_type(image.blocks, 'BOOT')`. Ultima e utilă de exemplu pentru un `foreach` doar peste blocurile BOOT.
+- Înainte de conectare se verifică două lucruri. Un block al cărui tip nu are secvență proprie și nici `default` oprește job-ul. O secvență goală pentru un tip apare ca avertisment.
+
+În editorul de secvențe, butonul **Block sequence** adaugă o secțiune pentru BOOT, APP, CAL, DATA sau alt tip. Secțiunea pornește ca o copie a celei `default`, ca să modifici doar ce diferă. Pe pagina Flash, fiecare fișier are pe card eticheta tipului, iar tabul Sequence arată ce secvență primește fiecare block.
 
 STmin se poate schimba și per pas, de exemplu doar pentru download:
 

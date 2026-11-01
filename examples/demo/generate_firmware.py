@@ -16,6 +16,11 @@ def blob(seed: int, size: int) -> bytes:
 
 
 def main() -> None:
+    boot = bincopy.BinFile()
+    boot.add_binary(blob(6, 24 * 1024), address=0x0000_0000)  # bootloader update (block type BOOT)
+    with open(os.path.join(HERE, "boot.hex"), "w") as f:
+        f.write(boot.as_ihex())
+
     app = bincopy.BinFile()
     app.add_binary(blob(1, 96 * 1024), address=0x0001_0000)  # application
     app.add_binary(blob(2, 8 * 1024), address=0x0003_0000)  # second segment, gap in between
@@ -37,7 +42,7 @@ def main() -> None:
         z.write(os.path.join(HERE, "app.hex"), "app.hex")
         z.write(os.path.join(HERE, "cal.s19"), "cal.s19")
     write_vbf(os.path.join(HERE, "seat_sw.vbf"), 0x0008_0000, blob(5, 16 * 1024))
-    print("app.hex, cal.s19, gateway.bin, body_sw.pdx, seat_sw.vbf written")
+    print("boot.hex, app.hex, cal.s19, gateway.bin, body_sw.pdx, seat_sw.vbf written")
 
 
 def write_vbf(path: str, address: int, data: bytes) -> None:

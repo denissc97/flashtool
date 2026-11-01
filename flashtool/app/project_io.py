@@ -125,6 +125,7 @@ def save_project(data: dict, path: str) -> None:
 # -- sequences -----------------------------------------------------------------
 def sequence_for_editing(path: str) -> tuple[dict, bool]:
     """(editable sequence, was_flattened). Templates with `extends` are resolved into one flat sequence."""
+    path = os.path.abspath(path)
     raw = load_yaml(path) or {}
     if "extends" not in raw:
         raw.setdefault("name", os.path.splitext(os.path.basename(path))[0])
@@ -140,6 +141,7 @@ def sequence_for_editing(path: str) -> tuple[dict, bool]:
         "catalog": [_relative(c, folder) for c in seq.get("catalogs", [])],
         "variables": _hexify(seq["variables"]),
         "steps": _hexify(seq["steps"]),
+        "block_sequences": {name: _hexify(steps) for name, steps in seq["block_sequences"].items()},
         "finally": _hexify(seq["finally"]),
     }
     if not flat["catalog"]:

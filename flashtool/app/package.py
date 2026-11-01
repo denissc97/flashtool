@@ -246,7 +246,7 @@ class _Collector:
             raise PackageError(f"{path}: template must be a mapping")
         self.docs[path] = raw
         self._catalogs(path, raw, "catalog", folder, tid)
-        for section in ("steps", "finally", "patch"):
+        for section in ("steps", "finally", "patch", "block_sequences"):
             self._scripts(path, raw.get(section), folder, tid)
         if raw.get("extends"):
             try:

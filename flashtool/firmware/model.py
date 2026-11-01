@@ -6,6 +6,20 @@ import hashlib
 import zlib
 from dataclasses import dataclass, field
 
+# Block types with a meaning of their own; any other type (SBL, CARCFG, ...) is kept as written.
+BLOCK_TYPES = ("BOOT", "APP", "CAL", "DATA")
+_TYPE_ALIASES = {
+    "APPL": "APP", "APPLICATION": "APP", "CODE": "APP", "EXE": "APP", "SW": "APP",
+    "BOOTLOADER": "BOOT", "BTLD": "BOOT", "FBL": "BOOT",
+    "CALIB": "CAL", "CALIBRATION": "CAL",
+}
+
+
+def normalize_block_type(value: object) -> str | None:
+    """'calibration' -> 'CAL', 'CODE' (ODX) / 'EXE' (VBF) -> 'APP'; None or '' -> None."""
+    text = str(value or "").strip().upper().replace(" ", "_")
+    return _TYPE_ALIASES.get(text, text) or None
+
 
 @dataclass
 class Segment:
@@ -35,6 +49,8 @@ class LogicalBlock:
     erase_ranges: list[tuple[int, int]] | None = None  # (address, length)
     signature: bytes | None = None
     metadata: dict = field(default_factory=dict)
+    type: str = "APP"  # BOOT / APP / CAL / DATA / ...: selects the block sequence of the template
+    index: int | None = None  # logical block index (erase by block number, ODX LOGICAL-BLOCK-INDEX)
 
     @property
     def start(self) -> int:
@@ -88,6 +104,11 @@ class FirmwareImage:
     @property
     def total_size(self) -> int:
         return sum(b.size for b in self.blocks)
+
+    @property
+    def types(self) -> list[str]:
+        """Block types in flash order, each once."""
+        return list(dict.fromkeys(b.type for b in self.blocks))
 
 
 def sha256_file(path: str) -> str:

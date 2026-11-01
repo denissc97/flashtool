@@ -26,9 +26,11 @@ from ..app.project import Project, ProjectError, load_project
 from ..app.project_io import load_yaml, new_project, new_target, project_from_data, save_project
 from ..hal.backends import list_channels
 from ..sequence import events as ev
-from ..sequence.loader import SequenceError, describe_step, flatten, is_builtin, load_sequence, template_path
+from ..sequence.loader import (
+    SequenceError, block_sequence_key, describe_step, flatten, is_builtin, load_sequence, template_path,
+)
 from .project_editor import (
-    FirmwareEditor, TargetEditor, entry_path, newer_release, put_release_file, release_candidates,
+    FirmwareEditor, TargetEditor, entry_block_types, entry_path, newer_release, put_release_file, release_candidates,
 )
 from .sequence_editor import SequenceEditor
 from .theme import apply_theme, icon, tokens
@@ -754,7 +756,7 @@ class MainWindow(QMainWindow):
             rows.append({
                 "index": i, "path": entry_path(entry, base), "session": entry.get("session"),
                 "provider": lambda e=dict(entry), i=i: release_candidates(e, base, self._history(target_id, i)),
-                "newer": newer_release(entry, base),
+                "newer": newer_release(entry, base), "types": entry_block_types(entry, base),
             })
         card.set_firmware(rows, editable=not self.sealed and target_id not in self.manager.running)
 
@@ -888,18 +890,24 @@ class MainWindow(QMainWindow):
         self.seq_tree.clear()
         self._step_items.clear()
         try:
-            _, seq, warnings = prepare(self.project, target)
+            image, seq, warnings = prepare(self.project, target)
         except JobSetupError as exc:
             QTreeWidgetItem(self.seq_tree, ["Not ready", str(exc)])
             return
         root_title = f"{seq['name']}  ({' ← '.join(os.path.basename(s) for s in reversed(seq['sources']))})"
-        for section in ("steps", "finally"):
-            top = QTreeWidgetItem(self.seq_tree, [root_title if section == "steps" else "Always at the end"])
+        sections = [(root_title, seq["steps"])]
+        sections += [(f"Block sequence {name}", steps) for name, steps in seq["block_sequences"].items()]
+        for title, steps in sections + [("Always at the end", seq["finally"])]:
+            top = QTreeWidgetItem(self.seq_tree, [title])
             parents = {0: top}
-            for depth, step in flatten(seq[section]):
+            for depth, step in flatten(steps):
                 item = QTreeWidgetItem(parents[depth], [step.get("id", "?"), describe_step(step), "", ""])
                 parents[depth + 1] = item
                 self._step_items[step.get("id", "?")] = item
+        if seq["block_sequences"]:
+            blocks = QTreeWidgetItem(self.seq_tree, ["Blocks → block sequence"])
+            for b in image.blocks:
+                QTreeWidgetItem(blocks, [b.name, f"type {b.type} → {block_sequence_key(seq, b.type) or 'none'}"])
         self.seq_tree.expandAll()
         self.seq_tree.resizeColumnToContents(0)
         for sid, (status, info) in self.states[target.id].steps.items():

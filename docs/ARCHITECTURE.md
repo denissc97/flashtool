@@ -154,9 +154,17 @@ class LogicalBlock:                          # = o unitate de erase/download
     signature: bytes | None = None
     checksum: bytes | None = None
     metadata: dict
+    type: str = "APP"                        # BOOT / APP / CAL / DATA / ...: alege block sequence-ul
+    index: int | None = None                 # logical block index (erase după număr de bloc)
 @dataclass
 class FirmwareImage:  blocks: list[LogicalBlock]; source: str; sha256: str
 ```
+
+**Mai multe logical blocks per ECU (REQ-15).** Fiecare fișier din proiect dă unul sau mai multe blocuri, flash-uite în
+ordinea din proiect. Tipul unui bloc vine, în ordinea priorității, din `type` al intrării din proiect, din fișier
+(ODX-F `DATABLOCK TYPE`, VBF `sw_part_type`) sau e `APP`. Aliasuri: `CODE`/`EXE` → APP, `FBL`/`BOOTLOADER` → BOOT,
+`CALIBRATION` → CAL; celelalte tipuri (SBL, CARCFG...) rămân cum sunt scrise. `block_index` vine din proiect sau din
+ODX-F `LOGICAL-BLOCK-INDEX`; două blocuri cu același index sunt eroare de validare.
 
 **Fișiere deja comprimate/criptate (REQ-01).** Tool-ul **nu** comprimă și **nu** criptează. Trimite octeții exact
 cum sunt în fișier și setează parametrii din 0x34 din configurație:
@@ -198,6 +206,7 @@ Secvența este **date**, nu cod. Tipuri de pași:
 | `security` | 0x27 seed → provider → key |
 | `authenticate` | 0x29 cu certificate (§4.7) |
 | `download` | 0x34 (DFI, ALFID, memorySize) → 0x36 × N (BSC rulant) → 0x37 |
+| `program_block` | Rulează block sequence-ul tipului blocului (`block_sequences[block.type]`, altfel `default`) |
 | `java_job` | Rulează un job `.jar` OEM (§4.6) |
 | `foreach`, `if`, `call` | Control al fluxului |
 | `tester_present`, `delay`, `wait_ecu`, `read_into`, `prompt` | Utilitare |
@@ -223,6 +232,27 @@ patch:
 transport_overrides:
   download: { stmin_rx: 0, block_size: 0 }     # STmin diferit doar în timpul transferului
 ```
+
+**Block sequences (REQ-15).** Pașii de programare a unui bloc stau în `block_sequences`, câte o listă per tip de bloc.
+`uds_standard` definește doar `default` (erase după adresă → download → check memory), iar bucla `foreach block`
+conține un singur pas `program_block`. Un template OEM adaugă listele care diferă:
+
+```yaml
+extends: uds_standard
+block_sequences:
+  BOOT: [ ... activare bootloader, reset, 10 03, 10 02, 27 ... ]   # bootloader update
+  CAL:  [ ... erase cu ${u8(block.index)} ... ]                   # erase după număr de bloc
+  DATA: null                                                       # null: șterge lista moștenită
+```
+
+Reguli:
+- id-urile de pași sunt unice în toată secvența, deci și între block sequences;
+- `patch` caută și în block sequences;
+- un block sequence nu poate conține `program_block` sau `group: once`.
+
+Înainte de conectare, `prepare()` oprește job-ul dacă un bloc are un tip fără listă proprie și fără `default`. Tot atunci
+avertizează la liste goale și la block sequences pe care niciun `program_block` nu le folosește. În trace și în raport,
+calea pasului arată lista folosită, de exemplu `blocks[calibration]/program[CAL]/cal_erase`.
 
 ### 4.6 Flash job-uri OEM `.jar` (`flashtool/javajobs/`) — nou
 
@@ -370,6 +400,7 @@ RID-urile marcate cu * sunt variabile (diferă între OEM-uri).
 | 6 | Prog | `10 02` | fizic | Programming session → `wait_ecu` |
 | 7 | Prog | `27 xx/xx+1` **sau** `29 ...` | fizic | Security access sau autentificare pe certificate |
 | 8 | Prog | `2E F1 5A`* | fizic | Fingerprint (opțional) |
+| 9 | Prog | `program_block` per bloc | | Pașii 9a–9e sunt `block_sequences.default`; tipurile cu listă proprie (BOOT, CAL...) o rulează pe a lor |
 | 9a | Prog | `31 01 FF 00 <ALFID> <addr> <len>` | fizic | Erase memory |
 | 9b | | `34 <DFI> <ALFID> <addr> <memorySize>` | fizic | Request download |
 | 9c | | `36 <BSC> <data>` × N | fizic | Transfer data |
@@ -537,6 +568,7 @@ hash, evaluarea fiecărei componente SOUP (inclusiv interpretorul Python).
 | F4b | Blocat: job-uri `.jar` (Q-11) |
 | F5 | Gata în simulare: LIN-TP + backend Vector XL LIN (netestat pe hardware). Linux + VN: R-02 deschis |
 | F6 | Gata: build stand-alone, SBOM, SHA256SUMS, template installer Windows, trasabilitate, draft Tool Safety Manual |
+| Extensii | Gata în simulare: block sequences per tip de bloc (BOOT/APP/CAL/DATA), erase după logical block index |
 
 Toate fazele „gata” sunt validate doar pe simulator. Validarea HIL cu VN și ECU-uri reale (REQ-05) rămâne de făcut.
 

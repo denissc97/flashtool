@@ -289,7 +289,7 @@ def test_cli_inspect_prints_part_number(tmp_path, rand, capsys):
     path = write(tmp_path, build_vbf([(0x10000, rand.randbytes(256)), (0x30000, rand.randbytes(16))]))
     assert main(["inspect", path]) == 0
     out = capsys.readouterr().out
-    assert "block app [EXE]: 0x00010000 - 0x0003000F" in out
+    assert "block app [APP (EXE)]: 0x00010000 - 0x0003000F" in out
     assert "sw_part_number=32290001, sw_version=AA, sw_part_type=EXE" in out
 
 

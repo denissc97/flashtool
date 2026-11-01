@@ -179,7 +179,7 @@ def test_run_job_writes_report_and_audit(project_dir):
     report = json.load(open(finished.report))
     assert report["success"] and report["firmware"]["blocks"][0]["size"] == 23000
     assert any("deviation from ISO 15765-2" in w for w in report["warnings"])
-    assert any(s["path"] == "blocks[app]/download" and s["status"] == "ok" for s in report["steps"])
+    assert any(s["path"] == "blocks[app]/program[default]/download" and s["status"] == "ok" for s in report["steps"])
     ok, count, _ = audit.verify(str(project_dir.dir / "out" / "audit.jsonl"))
     assert ok and count == 1
 

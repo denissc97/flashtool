@@ -2,7 +2,8 @@
 # (virtual CAN and LIN buses, DoIP on localhost).
 #
 #  - bcm + door share one CAN bus: one process, functional steps sent once for both;
-#    door takes its firmware from a PDX (ODX-F session CAL_ONLY)
+#    bcm has three logical blocks (BOOT, APP, CAL), each type with its own block sequence
+#    in oem_demo.yaml; door takes its firmware from a PDX (ODX-F session CAL_ONLY)
 #  - seat: LIN slave (LIN-TP, functional requests get no response on LIN)
 #  - gateway: CAN FD, its own process; sleeps until woken up, kept awake by a cyclic NM frame
 #  - adas: DoIP with certificate authentication (0x29), keys held by the credential broker
@@ -31,9 +32,13 @@ targets:
       bus_log: bus.blf
     uds: { p2_ms: 150, p2_star_ms: 5000, tester_present_s: 2.0 }
     firmware:
-      - { file: app.hex, name: application }
-      - { file: cal.s19, name: calibration }
+      - { file: boot.hex, name: bootloader, type: BOOT }
+      - { file: app.hex, name: application, type: APP }
+      - { file: cal.s19, name: calibration, type: CAL, block_index: 2 }
     sequence: oem_demo.yaml
+    simulator:   # logical blocks for erase by block number, routine 0xFF02 = activate the new bootloader
+      logical_blocks: [[0, 0x00000000, 0x8000], [1, 0x00010000, 0x30000], [2, 0x00080000, 0x10000]]
+      routines: [0xFF02]
     seed_key: { provider: python, path: seedkey_demo.py }
 
   - id: door

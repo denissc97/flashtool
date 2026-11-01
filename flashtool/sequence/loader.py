@@ -8,12 +8,15 @@ from typing import Any
 
 import yaml
 
+from ..firmware.model import normalize_block_type
+
 BUILTIN_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
 
 STEP_KINDS = (
-    "request", "service", "session", "security", "authenticate", "download", "foreach", "if", "tester_present",
-    "delay_ms", "wait_ecu", "reset", "read_did", "write_did", "log", "script",
+    "request", "service", "session", "security", "authenticate", "download", "program_block", "foreach", "if",
+    "tester_present", "delay_ms", "wait_ecu", "reset", "read_did", "write_did", "log", "script",
 )
+DEFAULT_BLOCK_SEQUENCE = "default"  # block sequence for every block type without one of its own
 COMMON_KEYS = {
     "id", "name", "functional", "timeout_ms", "allow_nrc", "expect_response", "expect_data",
     "on_fail", "retries", "store", "when", "transport", "group",
@@ -43,6 +46,38 @@ def step_kind(step: dict) -> str:
 
 def child_lists(step: dict) -> list[list]:
     return [step[k] for k in ("steps", "else") if isinstance(step.get(k), list)]
+
+
+def block_sequence_key(seq: dict, block_type: str) -> str | None:
+    """Key of the block sequence that programs blocks of `block_type` (None: there is none)."""
+    seqs = seq.get("block_sequences") or {}
+    if block_type in seqs:
+        return block_type
+    return DEFAULT_BLOCK_SEQUENCE if DEFAULT_BLOCK_SEQUENCE in seqs else None
+
+
+def all_steps(seq: dict) -> list[dict]:
+    """Every step of a resolved sequence: main steps, block sequences, final steps."""
+    lists = [seq.get("steps") or []] + list((seq.get("block_sequences") or {}).values()) + [seq.get("finally") or []]
+    return [step for lst in lists for _, step in flatten(lst)]
+
+
+def _block_sequences(value: Any, where: str) -> dict:
+    """`block_sequences:` of a template: {BOOT: [steps], CAL: [steps], default: [steps]}."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise SequenceError(f"{where}: 'block_sequences' must map a block type to a list of steps")
+    out = {}
+    for key, steps in value.items():
+        name = str(key).strip()
+        name = DEFAULT_BLOCK_SEQUENCE if name.lower() == DEFAULT_BLOCK_SEQUENCE else normalize_block_type(name)
+        if not name:
+            raise SequenceError(f"{where}: empty block type in 'block_sequences'")
+        if name in out:
+            raise SequenceError(f"{where}: block type {name} appears twice in 'block_sequences'")
+        out[name] = copy.deepcopy(steps)  # None: drop the inherited sequence of this type
+    return out
 
 
 def _resolve_path(ref: str, base_dir: str) -> str:
@@ -107,7 +142,7 @@ def load_sequence(ref: str, base_dir: str = ".", _chain: tuple[str, ...] = ()) -
         data = yaml.safe_load(f) or {}
     if not isinstance(data, dict):
         raise SequenceError(f"{path}: template must be a mapping")
-    for key in ("steps", "finally", "patch"):
+    for key in ("steps", "finally", "patch", "block_sequences"):
         _resolve_scripts(data.get(key), os.path.dirname(path))
 
     if "extends" in data:
@@ -119,6 +154,11 @@ def load_sequence(ref: str, base_dir: str = ".", _chain: tuple[str, ...] = ()) -
             seq["steps"] = copy.deepcopy(data["steps"])
         if "finally" in data:
             seq["finally"] = copy.deepcopy(data["finally"])
+        for name, steps in _block_sequences(data.get("block_sequences"), path).items():  # per block type
+            if steps is None:
+                seq["block_sequences"].pop(name, None)
+            else:
+                seq["block_sequences"][name] = steps
         for op in data.get("patch") or []:
             _apply_patch(seq, op, path)
         seq["sources"].append(path)
@@ -130,6 +170,8 @@ def load_sequence(ref: str, base_dir: str = ".", _chain: tuple[str, ...] = ()) -
             "variables": dict(data.get("variables") or {}),
             "steps": copy.deepcopy(data.get("steps") or []),
             "finally": copy.deepcopy(data.get("finally") or []),
+            "block_sequences": {k: v for k, v in _block_sequences(data.get("block_sequences"), path).items()
+                                if v is not None},
             "sources": [path],
             "catalogs": _catalog_refs(data.get("catalog"), os.path.dirname(path)),
         }
@@ -170,7 +212,7 @@ def _deep_merge(dst: dict, src: dict) -> None:
 def _apply_patch(seq: dict, op: dict, path: str) -> None:
     if not isinstance(op, dict):
         raise SequenceError(f"{path}: patch entries must be mappings")
-    lists = [seq["steps"], seq["finally"]]
+    lists = [seq["steps"], *seq["block_sequences"].values(), seq["finally"]]
     kinds = [k for k in ("remove", "replace", "insert_after", "insert_before", "update", "append") if k in op]
     if len(kinds) != 1:
         raise SequenceError(f"{path}: patch entry needs exactly one operation, got {op}")
@@ -202,7 +244,7 @@ def _apply_patch(seq: dict, op: dict, path: str) -> None:
 def validate_sequence(seq: dict) -> None:
     seen: set[str] = set()
 
-    def walk(steps: list, where: str) -> None:
+    def walk(steps: list, where: str, in_block: bool = False) -> None:
         if not isinstance(steps, list):
             raise SequenceError(f"{where}: steps must be a list")
         for step in steps:
@@ -226,10 +268,16 @@ def validate_sequence(seq: dict) -> None:
                 raise SequenceError(f"step {sid or kind}: foreach needs 'in' and 'steps'")
             if kind == "if" and "steps" not in step:
                 raise SequenceError(f"step {sid or kind}: if needs 'steps'")
+            if in_block and kind == "program_block":
+                raise SequenceError(f"step {sid or kind}: a block sequence cannot program another block")
+            if in_block and "group" in step:
+                raise SequenceError(f"step {sid or kind}: 'group: once' is not allowed in a block sequence")
             for sub in child_lists(step):
-                walk(sub, sid or kind)
+                walk(sub, sid or kind, in_block)
 
     walk(seq["steps"], "steps")
+    for name, steps in (seq.get("block_sequences") or {}).items():
+        walk(steps, f"block_sequences.{name}", in_block=True)
     walk(seq["finally"], "finally")
 
 

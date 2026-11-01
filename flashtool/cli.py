@@ -102,8 +102,10 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     for src in image.sources:
         print(f"{src.path}  {src.size} bytes  sha256 {src.sha256}")
     for block in image.blocks:
-        kind = block.metadata.get("type")
-        print(f"block {block.name}{f' [{kind}]' if kind else ''}: 0x{block.start:08X} - 0x{block.end - 1:08X}, "
+        raw_type = block.metadata.get("type")
+        kind = block.type + (f" ({raw_type})" if raw_type and str(raw_type).upper() != block.type else "")
+        index = "" if block.index is None else f", logical block {block.index}"
+        print(f"block {block.name} [{kind}{index}]: 0x{block.start:08X} - 0x{block.end - 1:08X}, "
               f"{block.size} bytes, DFI 0x{block.data_format_identifier:02X}, "
               f"ALFID 0x{block.address_and_length_format:02X}, "
               f"memory_size {'-' if block.memory_size is None else block.memory_size}, "
@@ -122,22 +124,28 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 def cmd_sequence(args: argparse.Namespace) -> int:
     from .app.job import JobSetupError, prepare
     from .app.project import ProjectError, load_project
-    from .sequence.loader import describe_step, flatten
+    from .sequence.loader import block_sequence_key, describe_step, flatten
 
     try:
         project = load_project(args.project)
         target = project.target(args.target or project.targets[0].id)
-        _, seq, warnings = prepare(project, target)
+        image, seq, warnings = prepare(project, target)
     except (ProjectError, JobSetupError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(f"{seq['name']}  ({' <- '.join(reversed(seq['sources']))})")
     for name, value in seq["variables"].items():
         print(f"  var {name} = {f'0x{value:02X}' if isinstance(value, int) and not isinstance(value, bool) else repr(value)}")
-    for section in ("steps", "finally"):
-        print(f"{section}:")
-        for depth, step in flatten(seq[section]):
+    sections = [("steps", seq["steps"])] + [(f"block sequence {name}", steps)
+                                            for name, steps in seq["block_sequences"].items()]
+    for title, steps in sections + [("finally", seq["finally"])]:
+        print(f"{title}:")
+        for depth, step in flatten(steps):
             print(f"  {'  ' * depth}- {step.get('id', '?')}: {describe_step(step)}")
+    if seq["block_sequences"]:
+        print("blocks:")
+        for block in image.blocks:
+            print(f"  - {block.name} [{block.type}] -> {block_sequence_key(seq, block.type) or 'no block sequence'}")
     for w in warnings:
         print(f"warning: {w}")
     return 0

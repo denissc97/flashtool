@@ -192,7 +192,7 @@ class EcuCard(QFrame):
         self.fw_icon.setVisible(not t.firmware)
 
     def set_firmware(self, rows: list[dict], editable: bool) -> None:
-        """One release picker per firmware entry: {index, path, provider, newer, session}."""
+        """One release picker per firmware entry: {index, path, provider, newer, session, types}."""
         while self.fw_rows.count():
             item = self.fw_rows.takeAt(0)
             if item.layout() is not None:
@@ -202,6 +202,7 @@ class EcuCard(QFrame):
                         w.deleteLater()
         self.combos, self.latest_buttons = [], []
         self.release_btn.setVisible(not rows and editable)
+        tags: list[QLabel] = []
         for row in rows:
             line = QHBoxLayout()
             ico = QLabel()
@@ -212,6 +213,12 @@ class EcuCard(QFrame):
             combo.setEnabled(editable)
             combo.chosen.connect(lambda path, i=row["index"]: self.release_chosen.emit(self.target_id, i, path))
             line.addWidget(ico)
+            for kind in row.get("types") or []:  # BOOT / APP / CAL / DATA: which block sequence runs
+                tag = pill(kind, "badge")
+                tags.append(tag)
+                tag.setToolTip(f"Block type {kind}: programmed with the {kind} block sequence of the template "
+                               "(or the default one)")
+                line.addWidget(tag)
             line.addWidget(combo, 1)
             if row.get("session"):
                 line.addWidget(pill(row["session"], "badge"))
@@ -227,6 +234,11 @@ class EcuCard(QFrame):
             self.fw_rows.addLayout(line)
             self.combos.append(combo)
             self.latest_buttons.append(latest)
+        for tag in tags:  # same width for BOOT / APP / CAL: the release pickers line up
+            tag.ensurePolished()
+        width = max((tag.sizeHint().width() for tag in tags), default=0)
+        for tag in tags:
+            tag.setFixedWidth(width)
 
     def set_state(self, st, running: bool) -> None:
         kind = {"starting": "running"}.get(st.status, st.status)

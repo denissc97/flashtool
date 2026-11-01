@@ -24,8 +24,11 @@ def test_opens_demo_project(app):
     win = MainWindow(os.path.join(DEMO_DIR, "demo.ftproj"))
     try:
         assert len(win.cards) == 5 and not win.empty.isVisibleTo(win)
-        assert win.fw_editor.preview.topLevelItemCount() == 2  # bcm: application + calibration
+        assert win.fw_editor.preview.topLevelItemCount() == 3  # bcm: bootloader + application + calibration
         assert "download" in win._step_items and "read_boot_version" in win._step_items
+        assert "boot_activate" in win._step_items and "cal_erase" in win._step_items  # block sequences
+        assert [win.cards["bcm"].fw_rows.itemAt(i).layout().itemAt(1).widget().text() for i in range(3)] \
+            == ["BOOT", "APP", "CAL"]
         assert win.flash_all_btn.isEnabled() and not win.stop_btn.isEnabled()
     finally:
         win.manager.shutdown()
@@ -169,7 +172,7 @@ def test_firmware_form_follows_the_selected_ecu(app):
     win = MainWindow(os.path.join(DEMO_DIR, "demo.ftproj"))
     try:
         win.select_target("bcm")
-        assert win.fw_editor.form.data["file"] == "app.hex"
+        assert win.fw_editor.form.data["file"] == "boot.hex"
         win.select_target("door")  # firmware from the PDX
         assert win.fw_editor.form.data["file"] == "body_sw.pdx"
         assert win.fw_editor.form.widget("session").currentText() == "CAL_ONLY"
@@ -204,7 +207,7 @@ def test_new_release_replaces_the_file_and_keeps_its_options(app, tmp_path):
         new = make_hex(tmp_path / "releases" / "app_v2.hex", [(0x10000, b"\x22" * 8192)])
         win.cards["ecu1"].files_dropped.emit("ecu1", [str(new)])  # dropped from the file manager on the card
         entry = win.raw["targets"][0]["firmware"][0]
-        assert entry == {"file": str(new), "name": "application"}  # outside the project: absolute path
+        assert entry == {"file": str(new), "name": "application", "type": "APP"}  # outside the project: absolute path
         assert win.cards["ecu1"].combos[0].currentData() == str(new)
         assert "app_v2.hex" in win.fw_editor.file_info.text() and "SHA-256" in win.fw_editor.file_info.text()
         assert win.dirty and win.save_project()
@@ -333,6 +336,14 @@ def test_release_candidates_newest_first_and_pattern(tmp_path):
     assert newer_release({"file": str(new), "release_pattern": "app_*.hex"}, str(tmp_path)) is None
     assert old
 
+    # a file named after another block type is not offered as a release of this block
+    time.sleep(0.02)
+    make_hex(tmp_path / "boot_v9.hex", [(0x0, b"\x04" * 16)])
+    assert "boot_v9.hex" not in [os.path.basename(p) for p in release_candidates({"file": "app_v1.hex"}, str(tmp_path))]
+    assert newer_release({"file": "app_v2.hex"}, str(tmp_path)) is None
+    boot = [os.path.basename(p) for p in release_candidates({"file": "fw.hex", "type": "BOOT"}, str(tmp_path))]
+    assert boot[0] == "boot_v9.hex" and "app_v2.hex" not in boot and "other.hex" in boot
+
 
 def test_card_switches_release_in_one_click(app, tmp_path):
     import time
@@ -348,7 +359,7 @@ def test_card_switches_release_in_one_click(app, tmp_path):
         card = win.cards["ecu1"]
         assert card.latest_buttons[0].isVisibleTo(card)
         card.latest_buttons[0].click()  # one click: take the newest build
-        assert win.raw["targets"][0]["firmware"][0] == {"file": "app_v2.hex", "name": "application"}
+        assert win.raw["targets"][0]["firmware"][0] == {"file": "app_v2.hex", "name": "application", "type": "APP"}
         card = win.cards["ecu1"]
         assert card.combos[0].currentData() == str(v2) and not card.latest_buttons[0].isVisibleTo(card)
         labels = [card.combos[0].itemText(i) for i in range(card.combos[0].count())]
@@ -401,3 +412,59 @@ def test_ecu_tools_page(app):
         tools.shutdown()
         win.manager.shutdown()
         win.close()
+
+
+# -- block types and block sequences -------------------------------------------------------------
+@pytest.mark.req("REQ-15")
+def test_sequence_editor_block_sequences(app, tmp_path):
+    seq = SequenceEditor(str(tmp_path))  # starts from the standard sequence: default block sequence only
+    try:
+        titles = [seq.tree.topLevelItem(i).text(0) for i in range(seq.tree.topLevelItemCount())]
+        assert titles[1] == "Block sequence default"
+
+        cal = seq.add_block_sequence("calibration")  # copy of the default one, ids made unique
+        assert cal.text(0) == "Block sequence CAL"
+        assert [cal.child(i).text(0) for i in range(cal.childCount())] == ["cal_erase", "cal_download",
+                                                                           "cal_check_memory"]
+        assert seq.step_area.widget() is seq._block_panel and "type CAL" in seq._block_info.text()
+        boot = seq.add_block_sequence("BOOT", copy_default=False)
+        titles = [seq.tree.topLevelItem(i).text(0) for i in range(seq.tree.topLevelItemCount())]
+        assert titles[1:4] == ["Block sequence default", "Block sequence BOOT", "Block sequence CAL"]
+
+        seq.tree.setCurrentItem(boot)
+        seq.add_step("reset")  # steps added to the selected block sequence
+        erase = cal.child(0)
+        seq.tree.setCurrentItem(erase)
+        _set(seq._forms["foreach"], "in", "[(block.index, 1)]")
+        data = seq.collect()
+        assert list(data["block_sequences"]) == ["default", "BOOT", "CAL"]
+        assert data["block_sequences"]["BOOT"] == [{"id": "reset_1", "reset": 0x01}]
+        assert seq.validate()
+
+        seq.path = str(tmp_path / "typed.yaml")
+        assert seq.save()
+        loaded = load_sequence("typed.yaml", str(tmp_path))
+        assert loaded["block_sequences"]["CAL"][0]["in"] == "[(block.index, 1)]"
+
+        seq.remove_block_sequence(boot, confirm=False)
+        assert "BOOT" not in seq.collect()["block_sequences"]
+
+        preset = seq.add_preset("Program every block by its type")  # 'program' exists: renamed
+        assert preset.child(0).text(0) == "program_2"
+    finally:
+        seq.dirty = False
+        seq.close()
+
+
+@pytest.mark.req("REQ-15")
+def test_block_type_proposed_from_file_name(app, tmp_path):
+    from flashtool.gui.project_editor import entry_block_types, guess_block_type, put_release_file
+
+    assert [guess_block_type(n) for n in ("FBL_v3.hex", "cal.s19", "my_data.bin", "ecu_app.hex", "calendar.hex")] \
+        == ["BOOT", "CAL", "DATA", "APP", None]
+    make_hex(tmp_path / "boot_v1.hex", [(0, b"\x01" * 16)])
+    entries: list = []
+    put_release_file(entries, str(tmp_path / "boot_v1.hex"), str(tmp_path), None, lambda *_: None)
+    assert entries == [{"file": "boot_v1.hex", "type": "BOOT"}]
+    assert entry_block_types({"file": "body_sw.pdx", "session": "FULL"}, DEMO_DIR) == ["APP", "DATA"]
+    assert entry_block_types({"file": "seat_sw.vbf", "type": "cal"}, DEMO_DIR) == ["CAL"]

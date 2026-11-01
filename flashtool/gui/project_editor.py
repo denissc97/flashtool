@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import fnmatch
 import os
+import re
 from typing import Callable
 
 from PySide6.QtCore import QMimeData, Qt, Signal
@@ -15,11 +16,47 @@ from PySide6.QtWidgets import (
 
 from ..app.project_io import list_templates, new_target
 from ..firmware.loaders import FirmwareError, FirmwareSpec, detect_format, load_firmware, odx_sessions
-from ..firmware.model import sha256_file
+from ..firmware.model import BLOCK_TYPES, normalize_block_type, sha256_file
 from ..firmware.validate import validate_image
 from .forms import DictForm, F, Section
 
-FIRMWARE_FILTER = "Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx);;All files (*)"
+FIRMWARE_FILTER = ("Firmware (*.hex *.ihex *.s19 *.s28 *.s37 *.srec *.mot *.bin *.pdx *.odx-f *.odx *.vbf);;"
+                   "All files (*)")
+_PLAIN = ("ihex", "srec", "binary")  # formats without a block type of their own
+_GUESS = [  # file name -> proposed block type (shown in the editor, changeable)
+    (re.compile(r"(^|[^a-z])(boot|bootloader|btld|fbl)([^a-z]|$)", re.I), "BOOT"),
+    (re.compile(r"(^|[^a-z])(cal|calib|calibration)([^a-z]|$)", re.I), "CAL"),
+    (re.compile(r"(^|[^a-z])(data|dataset)([^a-z]|$)", re.I), "DATA"),
+    (re.compile(r"(^|[^a-z])(app|appl|application)([^a-z]|$)", re.I), "APP"),
+]
+_TYPES_CACHE: dict[tuple, list[str]] = {}
+
+
+def guess_block_type(path: str) -> str | None:
+    """Block type suggested by a plain file's name (boot_v2.hex -> BOOT, cal.s19 -> CAL)."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return next((kind for pattern, kind in _GUESS if pattern.search(stem)), None)
+
+
+def entry_block_types(entry: dict, project_dir: str) -> list[str]:
+    """Block types of one firmware entry: the explicit type, else what the file says (ODX-F, VBF), else APP."""
+    explicit = normalize_block_type(entry.get("type"))
+    if explicit:
+        return [explicit]
+    path = entry_path(entry, project_dir)
+    try:
+        if detect_format(path) in _PLAIN:
+            return ["APP"]
+        st = os.stat(path)
+    except (FirmwareError, OSError):
+        return []
+    key = (path, st.st_mtime_ns, st.st_size, entry.get("session"))
+    if key not in _TYPES_CACHE:
+        try:
+            _TYPES_CACHE[key] = load_firmware([FirmwareSpec.from_dict(dict(entry))], project_dir).types
+        except Exception:
+            _TYPES_CACHE[key] = []
+    return _TYPES_CACHE[key]
 
 
 def is_firmware_file(path: str) -> bool:
@@ -76,6 +113,8 @@ def put_release_file(entries: list, path: str, project_dir: str, index: int | No
     replacing = index is not None and 0 <= index < len(entries)
     if not replacing:
         entry = {"file": stored}
+        if kind in _PLAIN and guess_block_type(path):
+            entry["type"] = guess_block_type(path)
         entries.append(entry)
         action = "added"
     else:
@@ -111,9 +150,11 @@ def release_candidates(entry: dict, project_dir: str, history: list[str] | tuple
     """Files a new release of `entry` can be picked from, newest first, then recently used ones.
 
     Looks in the entry's `release_dir` (default: the folder of the current file) for files matching
-    `release_pattern` (default: the same firmware type as the current file).
+    `release_pattern` (default: the same firmware format as the current file, leaving out files whose
+    name says they are another block type: boot_v2.hex is not a release of an APP block).
     """
     current = entry_path(entry, project_dir)
+    own_type = normalize_block_type(entry.get("type")) or guess_block_type(current)
     folder = entry.get("release_dir")
     folder = (folder if os.path.isabs(folder) else os.path.join(project_dir, folder)) if folder else os.path.dirname(current)
     pattern = entry.get("release_pattern")
@@ -138,6 +179,8 @@ def release_candidates(entry: dict, project_dir: str, history: list[str] | tuple
                 if detect_format(path) != kind:
                     continue
             except FirmwareError:
+                continue
+            if own_type and guess_block_type(path) not in (None, own_type):
                 continue
         found.append(path)
     found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
@@ -290,6 +333,11 @@ def firmware_sections(project_dir: Callable[[], str]) -> list[Section]:
         Section("File", [
             F("file", "File", "file", file_filter=FIRMWARE_FILTER),
             F("name", "Block name"),
+            F("type", "Block type", "combo", [""] + list(BLOCK_TYPES),
+              tip="Selects the block sequence of the template (BOOT, APP, CAL, DATA or your own type). "
+                  "Empty: from the file (ODX-F TYPE, VBF sw_part_type), else APP"),
+            F("block_index", "Logical block index", "int",
+              tip="Block number for templates that erase by block (${block.index}); ODX-F: from the file"),
         ]),
         Section("New releases", [
             F("release_dir", "Release folder", "dir",
@@ -348,9 +396,10 @@ class FirmwareEditor(QWidget):
         self.project_dir = project_dir
         self.entries: list = []
 
-        self.table = DropTable(0, 3)
-        self.table.setHorizontalHeaderLabels(["File", "Type", "Options"])
-        self.table.setToolTip("Drop .hex / .s19 / .bin / .pdx files here (on a row to replace that file)")
+        self.table = DropTable(0, 4)
+        self.table.setHorizontalHeaderLabels(["File", "Format", "Block type", "Options"])
+        self.table.setToolTip("Drop .hex / .s19 / .bin / .pdx / .vbf files here (on a row to replace that file).\n"
+                              "Files are flashed in this order; each block runs the block sequence of its type.")
         self.table.files_dropped.connect(self._dropped)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -374,7 +423,7 @@ class FirmwareEditor(QWidget):
         form_scroll.setWidgetResizable(True)
 
         self.preview = QTreeWidget()
-        self.preview.setHeaderLabels(["Block / segment", "Start", "End", "Bytes", "DFI", "ALFID", "CRC32",
+        self.preview.setHeaderLabels(["Block / segment", "Type", "Start", "End", "Bytes", "DFI", "ALFID", "CRC32",
                                       "Identification"])
         self.status = QLabel("")
         self.status.setWordWrap(True)
@@ -425,8 +474,11 @@ class FirmwareEditor(QWidget):
             except FirmwareError:
                 kind = "?"
             opts = ", ".join(f"{k}={v:#x}" if isinstance(v, int) and not isinstance(v, bool) else f"{k}={v}"
-                             for k, v in e.items() if k != "file")
-            for col, text in enumerate((str(e.get("file", "")), kind, opts)):
+                             for k, v in e.items() if k not in ("file", "type"))
+            types = ", ".join(entry_block_types(e, self.project_dir())) or "?"
+            if not e.get("type"):
+                types += " (from file)" if kind not in _PLAIN else " (default)"
+            for col, text in enumerate((str(e.get("file", "")), kind, types, opts)):
                 self.table.setItem(row, col, QTableWidgetItem(text))
 
     def _row(self) -> int:
@@ -534,16 +586,18 @@ class FirmwareEditor(QWidget):
             return
         for b in image.blocks:
             item = QTreeWidgetItem(self.preview, [
-                b.name, f"0x{b.start:08X}", f"0x{b.end - 1:08X}", f"{b.size}",
+                b.name, b.type + ("" if b.index is None else f" #{b.index}"),
+                f"0x{b.start:08X}", f"0x{b.end - 1:08X}", f"{b.size}",
                 f"0x{b.data_format_identifier:02X}", f"0x{b.address_and_length_format:02X}", f"{b.crc32:08X}",
                 ", ".join(f"{k}={v}" for k, v in (b.metadata.get("own_idents") or {}).items()),
             ])
             for s in b.segments:
-                QTreeWidgetItem(item, ["segment", f"0x{s.address:08X}", f"0x{s.end - 1:08X}", f"{len(s.data)}"])
+                QTreeWidgetItem(item, ["segment", "", f"0x{s.address:08X}", f"0x{s.end - 1:08X}", f"{len(s.data)}"])
         issues = validate_image(image)
         if issues:
             self.status.setStyleSheet("color: #b42318" if any(i.severity == "error" for i in issues) else "color: #b7791f")
             self.status.setText("\n".join(str(i) for i in issues))
         else:
             self.status.setStyleSheet("color: #2f7d5b")
-            self.status.setText(f"{len(image.blocks)} block(s), {image.total_size} bytes")
+            self.status.setText(f"{len(image.blocks)} block(s), {image.total_size} bytes, "
+                                f"flash order: {' → '.join(f'{b.name} [{b.type}]' for b in image.blocks)}")
