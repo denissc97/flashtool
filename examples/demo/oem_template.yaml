@@ -1,0 +1,8 @@
+name: oem_template
+extends: uds_standard
+
+variables: {}
+
+patch: []
+#  - replace: security
+#    with: {id: authenticate, authenticate: {}}

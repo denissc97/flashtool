@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ODX xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" MODEL-VERSION="2.2.0">
+  <DIAG-LAYER-CONTAINER ID="DLC.test">
+    <SHORT-NAME>DLC_test</SHORT-NAME>
+    <BASE-VARIANTS>
+      <BASE-VARIANT ID="BV.ecu">
+        <SHORT-NAME>DemoECU</SHORT-NAME>
+        <DIAG-COMMS>
+          <DIAG-SERVICE ID="DS.ReadBootVersion">
+            <SHORT-NAME>ReadBootVersion</SHORT-NAME>
+            <REQUEST-REF ID-REF="RQ.ReadBootVersion"/>
+          </DIAG-SERVICE>
+        </DIAG-COMMS>
+        <REQUESTS>
+          <REQUEST ID="RQ.ReadBootVersion">
+            <SHORT-NAME>RQ_ReadBootVersion</SHORT-NAME>
+            <PARAMS>
+              <PARAM SEMANTIC="SERVICE-ID" xsi:type="CODED-CONST">
+                <SHORT-NAME>SID</SHORT-NAME>
+                <BYTE-POSITION>0</BYTE-POSITION>
+                <CODED-VALUE>34</CODED-VALUE>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE"><BIT-LENGTH>8</BIT-LENGTH></DIAG-CODED-TYPE>
+              </PARAM>
+              <PARAM SEMANTIC="ID" xsi:type="CODED-CONST">
+                <SHORT-NAME>DID</SHORT-NAME>
+                <BYTE-POSITION>1</BYTE-POSITION>
+                <CODED-VALUE>61833</CODED-VALUE>
+                <DIAG-CODED-TYPE BASE-DATA-TYPE="A_UINT32" xsi:type="STANDARD-LENGTH-TYPE"><BIT-LENGTH>16</BIT-LENGTH></DIAG-CODED-TYPE>
+              </PARAM>
+            </PARAMS>
+          </REQUEST>
+        </REQUESTS>
+      </BASE-VARIANT>
+    </BASE-VARIANTS>
+  </DIAG-LAYER-CONTAINER>
+</ODX>

@@ -1,0 +1,7 @@
+# Services written by hand, for ECUs without an ODX-D/CDD (or to complete one).
+services:
+  Fingerprint_Write:
+    request: "2E F1 5A ${data}"
+    params: [data]
+    description: Programming fingerprint (date + tester id)
+  ReadActiveSession: "22 F1 86"

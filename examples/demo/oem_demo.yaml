@@ -1,0 +1,33 @@
+# Example OEM template: starts from the standard sequence and changes it explicitly.
+name: OEM demo programming
+extends: uds_standard
+catalog: [demo_ecu.odx-d, demo_catalog.yaml]   # named services: ODX-D + hand-written
+
+variables:
+  security_level: 0x01
+  fingerprint: "${date_bcd() + u16(0x1234) + hexbytes('000000000000')}"   # YYMMDD + tester id + 6 bytes
+
+patch:
+  # Read the bootloader version first and keep it for the report.
+  - insert_after: prog_session
+    steps:
+      - id: read_boot_version
+        service: ReadBootVersion          # from demo_ecu.odx-d
+        store: boot_version
+      - id: log_boot_version
+        log: "Bootloader version ${boot_version}"
+
+  # Faster flow control from our side, but only while data is transferred.
+  - update: download
+    with:
+      transport: { stmin_rx: 0, block_size: 0 }
+
+  # Fingerprint through the named service instead of raw bytes.
+  - replace: fingerprint
+    with:
+      id: fingerprint
+      service: Fingerprint_Write          # from demo_catalog.yaml
+      params: { data: "${fingerprint}" }
+
+  # This OEM does not use the precondition routine.
+  - remove: precondition_check

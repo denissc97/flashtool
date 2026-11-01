@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flashtool"
+version = "0.1.0"
+description = "ECU flashing tool (UDS over CAN / CAN FD / LIN / DoIP) for Vector VN hardware"
+requires-python = ">=3.11"
+dependencies = [
+    "python-can>=4.4,<5",
+    "can-isotp>=2.0,<3",
+    "doipclient>=1.1,<2",
+    "bincopy>=20,<21",
+    "PyYAML>=6",
+    "cryptography>=42",
+    "odxtools>=11.7,<12",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.6"]
+dev = ["pytest>=8", "import-linter>=2", "pyinstaller>=6", "cyclonedx-bom>=4"]
+
+[project.scripts]
+flashtool = "flashtool.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["flashtool*"]
+
+[tool.setuptools.package-data]
+flashtool = ["templates/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hil: needs real hardware (Vector VN + ECU)",
+    "req(id, ...): requirement(s) from docs/requirements.yaml verified by the test",
+]
+
+# Layer rules from docs/ARCHITECTURE.md §3 (checked with `lint-imports`).
+[tool.importlinter]
+root_package = "flashtool"
+
+[[tool.importlinter.contracts]]
+name = "Layered architecture"
+type = "layers"
+layers = [
+    "flashtool.cli",  # entry point: also launches the GUI
+    "flashtool.gui",
+    "flashtool.app",
+    "flashtool.sequence",
+    "flashtool.uds | flashtool.firmware | flashtool.security | flashtool.sim | flashtool.diagdb",
+    "flashtool.transport",
+    "flashtool.hal",
+]

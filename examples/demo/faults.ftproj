@@ -1,0 +1,18 @@
+# Error-handling demo: the simulated ECU answers the 5th TransferData with
+# NRC 0x72 (generalProgrammingFailure). The `blocks` loop retries the block from erase.
+name: FlashTool fault demo
+output_dir: out
+
+targets:
+  - id: door
+    name: Door module (fault injection)
+    transport: can
+    simulate: true
+    can: { backend: virtual, channel: sim-door }
+    firmware:
+      - { file: app.hex }
+    sequence: uds_standard
+    seed_key: { provider: python, path: seedkey_demo.py }
+    simulator:
+      faults:
+        - { sid: 0x36, nrc: 0x72, at: 5, times: 1 }

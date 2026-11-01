@@ -1,0 +1,9 @@
+# Example: an OEM that uses certificate-based Authentication (0x29) instead of SecurityAccess (0x27).
+name: OEM demo programming with certificates
+extends: uds_standard
+
+patch:
+  - replace: security
+    with:
+      id: authenticate
+      authenticate: { check_configuration: true, challenge_client_length: 16 }

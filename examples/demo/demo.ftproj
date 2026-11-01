@@ -1,0 +1,88 @@
+# Demo project: five simulated ECUs. Runs on macOS / Linux / Windows without hardware
+# (virtual CAN and LIN buses, DoIP on localhost).
+#
+#  - bcm + door share one CAN bus: one process, functional steps sent once for both;
+#    door takes its firmware from a PDX (ODX-F session CAL_ONLY)
+#  - seat: LIN slave (LIN-TP, functional requests get no response on LIN)
+#  - gateway: CAN FD, its own process
+#  - adas: DoIP with certificate authentication (0x29), keys held by the credential broker
+#
+# For a real ECU on a Vector VN interface (Windows) change a target to:
+#   simulate: false
+#   can: { backend: vector, channel: 0, app_name: FlashTool, bitrate: 500000, ... }
+name: FlashTool demo
+output_dir: out
+
+targets:
+  - id: bcm
+    name: Body controller (CAN 500k, OEM template)
+    transport: can
+    simulate: true
+    can:
+      backend: virtual
+      channel: sim-body
+      bitrate: 500000
+      tx_id: 0x7E0
+      rx_id: 0x7E8
+      func_id: 0x7DF
+      padding: 0xCC
+      stmin_rx: 0
+      block_size: 0
+      bus_log: bus.blf
+    uds: { p2_ms: 150, p2_star_ms: 5000, tester_present_s: 2.0 }
+    firmware:
+      - { file: app.hex, name: application }
+      - { file: cal.s19, name: calibration }
+    sequence: oem_demo.yaml
+    seed_key: { provider: python, path: seedkey_demo.py }
+
+  - id: door
+    name: Door module (same CAN bus as bcm)
+    transport: can
+    simulate: true
+    can: { backend: virtual, channel: sim-body, bitrate: 500000, tx_id: 0x7E1, rx_id: 0x7E9, func_id: 0x7DF }
+    firmware:
+      - { file: body_sw.pdx, session: CAL_ONLY }   # ODX-F session from a PDX container
+    sequence: uds_standard
+    seed_key: { provider: python, path: seedkey_demo.py }
+
+  - id: seat
+    name: Seat module (LIN 19.2k, NAD 0x0A)
+    transport: lin
+    simulate: true
+    lin: { backend: virtual, channel: sim-lin, baudrate: 19200, nad: 0x0A, n_cs_ms: 0, poll_interval_ms: 2 }
+    firmware:
+      - { file: cal.s19 }
+    sequence: uds_standard
+    seed_key: { provider: python, path: seedkey_demo.py }
+
+  - id: gateway
+    name: Gateway (CAN FD 500k/2M, 64-byte frames)
+    transport: canfd
+    simulate: true
+    can:
+      backend: virtual
+      channel: sim-gw
+      bitrate: 500000
+      data_bitrate: 2000000
+      tx_dl: 64
+      tx_id: 0x18DA10F1
+      rx_id: 0x18DAF110
+      func_id: 0x18DB33F1
+      extended_id: true
+    firmware:
+      - { file: gateway.bin, base_address: 0x00100000 }
+    sequence: uds_standard
+    seed_key: { provider: python, path: seedkey_demo.py }
+
+  - id: adas
+    name: ADAS ECU (DoIP, certificate authentication)
+    transport: doip
+    simulate: true
+    doip: { ecu_address: 0x0010, tester_address: 0x0E80 }
+    uds: { p2_ms: 500 }
+    firmware:
+      - { file: app.hex }
+    sequence: oem_cert.yaml
+    certificates: { provider: file, cert: pki/tester.pem, key: pki/tester.key, role: supplier }
+    simulator: { auth_trust_anchor: pki/root_ca.pem, require_authentication: true }

@@ -1,0 +1,94 @@
+# Standard UDS programming sequence (ISO 14229-1), docs/ARCHITECTURE.md §5.
+# Values that differ between OEMs are variables; OEM templates override them
+# with `variables:` or change steps with `patch:`.
+name: UDS standard programming
+description: Pre-programming, programming and post-programming per ISO 14229-1.
+
+variables:
+  security_level: 0x01
+  precondition_rid: 0x0203
+  erase_rid: 0xFF00
+  check_memory_rid: 0x0202
+  check_dependencies_rid: 0xFF01
+  routine_ok: 0x00            # first byte of routineStatusRecord meaning "correct"
+  fingerprint_did: 0xF15A
+  fingerprint: null           # bytes to write, e.g. "${date_bcd() + u16(0x1234)}"
+  wait_after_prog_session: false
+
+steps:
+  # --- pre-programming -------------------------------------------------
+  - id: tester_present_on
+    tester_present: on
+  - id: ext_session
+    group: once                 # once per bus when several ECUs share it
+    session: 0x03
+    functional: true
+  - id: precondition_check
+    request: "31 01 ${u16(precondition_rid)}"
+    on_fail: continue
+  - id: dtc_off
+    group: once
+    request: "85 82"            # DTC setting off, positive response suppressed
+    functional: true
+  - id: comm_off
+    group: once
+    request: "28 83 01"         # disable Rx and Tx of normal messages, suppressed
+    functional: true
+
+  # --- programming -----------------------------------------------------
+  - id: prog_session
+    session: 0x02
+  - id: wait_bootloader
+    when: wait_after_prog_session
+    wait_ecu: { timeout_ms: 5000 }
+  - id: security
+    security: { level: "${security_level}" }
+  - id: fingerprint
+    when: fingerprint is not None
+    write_did: { did: "${fingerprint_did}", data: "${fingerprint}" }
+  - id: blocks
+    foreach: block
+    in: image.blocks
+    on_fail: retry
+    retries: 1
+    steps:
+      - id: erase
+        foreach: region
+        in: block.effective_erase_ranges
+        steps:
+          - id: erase_region
+            request: "31 01 ${u16(erase_rid)} ${addr_size(block.address_and_length_format, region[0], region[1])}"
+            expect_data: "71 01 ${u16(erase_rid)} ${u8(routine_ok)}"
+      - id: download
+        download: block
+      - id: check_memory
+        request: "31 01 ${u16(check_memory_rid)} ${u32(block.crc32)}"
+        expect_data: "71 01 ${u16(check_memory_rid)} ${u8(routine_ok)}"
+  - id: check_dependencies
+    request: "31 01 ${u16(check_dependencies_rid)}"
+    expect_data: "71 01 ${u16(check_dependencies_rid)} ${u8(routine_ok)}"
+  - id: reset
+    reset: 0x01
+  - id: wait_after_reset
+    wait_ecu: { timeout_ms: 5000 }
+
+# --- post-programming: always runs, also after a failure ---------------
+finally:
+  - id: post_ext_session
+    group: once
+    session: 0x03
+    functional: true
+  - id: comm_on
+    group: once
+    request: "28 80 01"
+    functional: true
+  - id: dtc_on
+    group: once
+    request: "85 81"
+    functional: true
+  - id: default_session
+    group: once
+    session: 0x01
+    functional: true
+  - id: tester_present_off
+    tester_present: off

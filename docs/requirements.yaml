@@ -1,0 +1,45 @@
+# Tool requirements (docs/ARCHITECTURE.md §1). Tests reference them with @pytest.mark.req("REQ-xx");
+# `python tools/traceability.py` builds the requirement -> test matrix from a pytest run.
+# verification: test = automated test with the simulator, hil = needs real hardware, review = document review
+REQ-01:
+  title: Firmware files bin, Intel HEX, S-record, PDX/ODX-F, including already compressed or encrypted data
+  verification: test
+REQ-02:
+  title: Transports CAN, CAN FD (ISO 15765-2), LIN (ISO 17987), DoIP (ISO 13400-2)
+  verification: test
+REQ-03:
+  title: Standard UDS programming sequence (ISO 14229-1) with pre-, programming and post-programming phases
+  verification: test
+REQ-04:
+  title: Custom sequences from templates (extends / patch), named diagnostic services, OEM jobs
+  verification: test
+REQ-05:
+  title: Vector VN hardware family detected through the driver, no model-specific code
+  verification: hil
+REQ-06:
+  title: ECU security - Seed&Key (Python, 32/64-bit library) and certificate authentication 0x29
+  verification: test
+REQ-07:
+  title: Parallel flashing of several ECUs, one process per bus, shared functional steps once per bus
+  verification: test
+REQ-08:
+  title: Timing parameters STmin, BS, P2, P2*, S3 configurable per project and per step
+  verification: test
+REQ-09:
+  title: Stand-alone GUI and CLI with the same capabilities
+  verification: test
+REQ-10:
+  title: Evidence - per-run report, UDS trace, tamper-evident audit log, requirement traceability
+  verification: test
+REQ-11:
+  title: Input validation (firmware, sequence, credentials) before any communication with the ECU
+  verification: test
+REQ-12:
+  title: Post-programming steps always run, also after errors and cancellation
+  verification: test
+REQ-13:
+  title: Error handling - NRC 0x78 / 0x21, retry of a block from erase, failures isolated per ECU
+  verification: test
+REQ-14:
+  title: Templates cannot execute code (restricted expression language)
+  verification: test
