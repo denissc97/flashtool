@@ -38,6 +38,8 @@ class FirmwareSpec:
     max_gap: int = 0  # merge segments separated by <= max_gap bytes
     split: str = "file"  # "file": one block per file, "segments": one block per segment (not ODX)
     session: str | None = None  # ODX-F SESSION short name (needed when the file has several)
+    release_dir: str | None = None  # where new builds of this file appear (GUI release picker only)
+    release_pattern: str | None = None  # file name filter for the release picker, e.g. "app_*.hex"
 
     @classmethod
     def from_dict(cls, d: dict) -> FirmwareSpec:

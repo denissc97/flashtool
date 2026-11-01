@@ -173,7 +173,7 @@ class DictForm(QWidget):
                                  "hexlist": "0x22, 0x31", "params": "name=value; name=value"}.get(f.kind, ""))
         edit.editingFinished.connect(lambda f=f: self._edited(f))
         self._widgets[f.path] = (f, edit)
-        if f.kind != "file":
+        if f.kind not in ("file", "dir"):
             return edit
         holder = QWidget()
         row = QHBoxLayout(holder)
@@ -187,7 +187,10 @@ class DictForm(QWidget):
 
     def _browse(self, f: F, edit: QLineEdit) -> None:
         base = self.base_dir()
-        path, _ = QFileDialog.getOpenFileName(self, f.label, base, f.file_filter)
+        if f.kind == "dir":
+            path = QFileDialog.getExistingDirectory(self, f.label, base)
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, f.label, base, f.file_filter)
         if not path:
             return
         rel = os.path.relpath(path, base)

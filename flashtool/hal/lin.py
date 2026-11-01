@@ -47,6 +47,10 @@ class LinMaster(ABC):
     def poll_slave_response(self, timeout: float) -> bytes | None:
         """Send the 0x3D header; return the 8 data bytes, or None when no slave answers."""
 
+    def wake_up(self) -> None:
+        """Send a wake-up signal on the LIN bus (ISO 17987-2)."""
+        raise HardwareError(f"{type(self).__name__} cannot send a LIN wake-up")
+
     def __enter__(self) -> LinMaster:
         self.open()
         return self
@@ -114,6 +118,14 @@ class VirtualLinBus:
         for slave in slaves:
             slave.on_master_request(data)
 
+    def wake_up(self) -> None:
+        with self._lock:
+            slaves = list(self._slaves)
+        for slave in slaves:
+            hook = getattr(slave, "on_wakeup", None)
+            if hook is not None:
+                hook()
+
     def slave_response(self) -> bytes | None:
         with self._lock:
             slaves = list(self._slaves)
@@ -140,6 +152,10 @@ class VirtualLinMaster(LinMaster):
     def _require_open(self) -> None:
         if not self._open:
             raise HardwareError(f"virtual LIN channel {self.channel} is not open")
+
+    def wake_up(self) -> None:
+        self._require_open()
+        self.bus.wake_up()
 
     def send_master_request(self, data: bytes) -> None:
         self._require_open()
@@ -347,6 +363,14 @@ class VectorXlLinMaster(LinMaster):
             xl.xlCloseDriver()
             self._driver_open = False
         self._xl = None
+
+    def wake_up(self) -> None:
+        # XLstatus xlLinWakeUp(XLportHandle, XLaccess)  # verify against vxlapi.h
+        fn = getattr(self._xl, "xlLinWakeUp", None)
+        if fn is None:
+            raise HardwareError("xlLinWakeUp is not available in this XL Driver Library")
+        fn.restype, fn.argtypes = XLstatus, [XLportHandle, XLaccess]
+        self._check(fn(self._port, self._mask), "xlLinWakeUp")
 
     def _load_master_request(self, data: bytes) -> None:
         buf = (ctypes.c_ubyte * DIAG_FRAME_LEN)(*data)

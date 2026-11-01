@@ -80,6 +80,9 @@ class LinEcuServer:
             if req is not None:
                 self._requests.put((self._generation, req, False))
 
+    def on_wakeup(self) -> None:
+        self.ecu.wake()
+
     def slave_response(self) -> bytes | None:
         with self._lock:
             now = time.monotonic()

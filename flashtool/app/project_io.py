@@ -25,7 +25,7 @@ HEX_KEYS = {
     # project
     "tx_id", "rx_id", "func_id", "padding", "stmin_rx", "nad", "functional_nad", "ecu_address", "tester_address",
     "functional_address", "activation_type", "base_address", "memory_address", "memory_size", "dfi", "alfid",
-    "fill_gaps", "secret", "sid", "nrc", "security_level",
+    "fill_gaps", "secret", "sid", "nrc", "security_level", "id", "wakeup_id", "identification",
     # sequence steps
     "session", "level", "did", "reset", "allow_nrc",
 }

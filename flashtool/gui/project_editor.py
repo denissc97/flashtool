@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import os
 from typing import Callable
 
@@ -101,6 +102,64 @@ def put_release_file(entries: list, path: str, project_dir: str, index: int | No
     return f"{action} {os.path.basename(path)} ({describe_file(path)})"
 
 
+def entry_path(entry: dict, project_dir: str) -> str:
+    path = str(entry.get("file", ""))
+    return path if os.path.isabs(path) else os.path.normpath(os.path.join(project_dir, path))
+
+
+def release_candidates(entry: dict, project_dir: str, history: list[str] | tuple = (), limit: int = 30) -> list[str]:
+    """Files a new release of `entry` can be picked from, newest first, then recently used ones.
+
+    Looks in the entry's `release_dir` (default: the folder of the current file) for files matching
+    `release_pattern` (default: the same firmware type as the current file).
+    """
+    current = entry_path(entry, project_dir)
+    folder = entry.get("release_dir")
+    folder = (folder if os.path.isabs(folder) else os.path.join(project_dir, folder)) if folder else os.path.dirname(current)
+    pattern = entry.get("release_pattern")
+    try:
+        kind = detect_format(current)
+    except FirmwareError:
+        kind = None
+    found = []
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(folder, name)
+        if name.startswith(".") or not os.path.isfile(path):
+            continue
+        if pattern:
+            if not fnmatch.fnmatch(name, pattern):
+                continue
+        else:
+            try:
+                if detect_format(path) != kind:
+                    continue
+            except FirmwareError:
+                continue
+        found.append(path)
+    found.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    found = found[:limit]
+    for path in history:
+        if path not in found and os.path.isfile(path):
+            found.append(path)
+    return found
+
+
+def newer_release(entry: dict, project_dir: str) -> str | None:
+    """The newest candidate when it is newer than the file in use, else None."""
+    current = entry_path(entry, project_dir)
+    candidates = release_candidates(entry, project_dir)
+    if not candidates or os.path.abspath(candidates[0]) == os.path.abspath(current):
+        return None
+    try:
+        return candidates[0] if os.path.getmtime(candidates[0]) > os.path.getmtime(current) else None
+    except OSError:
+        return candidates[0]
+
+
 def describe_file(path: str) -> str:
     st = os.stat(path)
     when = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
@@ -169,6 +228,16 @@ def target_sections(project_dir: Callable[[], str]) -> list[Section]:
             F("doip.activation_type", "Routing activation type", "hex"),
             F("doip.use_tls", "TLS", "bool"),
         ], lambda d: _transport(d) == "doip"),
+        Section("Wake-up and identification", [
+            F("wakeup.frames", "Wake-up frames", "cyclic",
+              tip="CAN frames sent to wake the ECU, e.g. 0x500=01 (default: the cyclic messages). LIN: wake-up signal"),
+            F("wakeup.repeat", "Repeat", "int"),
+            F("wakeup.interval_ms", "Interval (ms)", "int"),
+            F("wakeup.wait_ms", "Wait after wake-up (ms)", "int"),
+            F("wakeup.before_flash", "Wake up before every flash", "bool"),
+            F("identification", "Identification DIDs", "hexlist",
+              tip="Read by ECU tools → Read identification (default: VIN, part numbers, SW/HW versions…)"),
+        ]),
         Section("UDS timing", [
             F("uds.p2_ms", "P2 (ms)", "int"),
             F("uds.p2_star_ms", "P2* (ms)", "int"),
@@ -195,6 +264,9 @@ def target_sections(project_dir: Callable[[], str]) -> list[Section]:
             F("simulator.erase_time_ms", "Erase time (ms)", "int"),
             F("simulator.auth_trust_anchor", "Root CA for 0x29", "file"),
             F("simulator.require_authentication", "Require 0x29", "bool"),
+            F("simulator.sleep_timeout_ms", "Falls asleep after (ms)", "int",
+              tip="Asleep until woken up; stays awake while the wake-up id is seen"),
+            F("simulator.wakeup_id", "Wake-up / keep-alive id", "hex"),
         ], lambda d: bool(d.get("simulate"))),
     ]
 
@@ -218,6 +290,11 @@ def firmware_sections(project_dir: Callable[[], str]) -> list[Section]:
         Section("File", [
             F("file", "File", "file", file_filter=FIRMWARE_FILTER),
             F("name", "Block name"),
+        ]),
+        Section("New releases", [
+            F("release_dir", "Release folder", "dir",
+              tip="Where new builds of this file appear (default: the folder of the current file)"),
+            F("release_pattern", "File name filter", tip="e.g. app_*.hex (default: same file type)"),
         ]),
         Section("Binary file", [F("base_address", "Load address", "hex")], lambda d: ext(d) == "binary"),
         Section("PDX / ODX-F", [F("session", "Session", "choice", sessions)], lambda d: ext(d) == "odx"),

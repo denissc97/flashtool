@@ -176,6 +176,12 @@ class LinTpTransport(Transport):
             self.master.close()
             self.master = None
 
+    def wake_up(self) -> None:
+        try:
+            self._require_master().wake_up()
+        except HardwareError as exc:
+            raise TransportError(str(exc)) from exc
+
     def _require_master(self) -> LinMaster:
         if self.master is None:
             raise TransportError("transport is not open")

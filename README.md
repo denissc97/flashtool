@@ -59,8 +59,9 @@ Navigarea se face din bara laterală, iar tema light/dark se schimbă din butonu
 
 | Pagină | Ce faci acolo |
 |---|---|
-| **Flash** | Câte un card pentru fiecare ECU: bus, fișierele de firmware, stare, progres, viteză, timp rămas, pasul curent. **Flash all** sau **Flash** per ECU. Un release nou se trage din Finder / Explorer direct pe card (sau **Change release…**). |
+| **Flash** | Câte un card pentru fiecare ECU: stare, progres, viteză, timp rămas, pasul curent. **Flash all** sau **Flash** per ECU. Pentru fiecare fișier al ECU-ului, un **selector**: cu un click alegi alt build din folderul de release (cel mai nou primul, cu data). **Use latest** apare când există un build mai nou și îl ia dintr-un click. Poți trage fișierul și din Finder / Explorer pe card. |
 | **Configure** | Lista de ECU-uri (**Add ECU** pentru CAN, CAN FD, LIN sau DoIP), apoi taburile **ECU settings** (bus, ID-uri, STmin, timpi, Seed&Key, certificate, mesaje CAN ciclice, custom actions), **Firmware** (fișiere, sesiune ODX-F, parametri 0x34 și blocurile rezultate), **Sequence** și **Sequence YAML**. **Sequence editor…** deschide editorul vizual de secvențe. |
+| **ECU tools** | Conectare la un ECU fără flash: **Wake up** (frame-urile de trezire pe CAN, wake-up signal pe LIN), **keep-alive** (frame-urile ciclice, pornite/oprite manual), **Read identification** (VIN, part number, versiuni SW/HW, serial, fingerprint…) și citirea oricărui DID, cu copiere în clipboard. |
 | **Trace & log** | Request-urile și răspunsurile UDS pentru ECU-ul ales, plus log-ul tuturor job-urilor. |
 | **Reports** | Toate rulările, cu rezultat, durată și eroare; pentru rularea selectată, unde s-a dus timpul (graficul duratelor pe pași) și throughput-ul transferului. |
 | **Hardware** | Interfețele CAN detectate. |
@@ -80,7 +81,9 @@ Comparația completă cu Vector vFlash este în [docs/VFLASH_COMPARISON.md](docs
 | **VBF** (Volvo / Geely / JLR) | Fișierul `.vbf` se adaugă ca orice firmware. Part number-ul, zonele de erase, DFI-ul și semnătura se citesc din header. CRC16 pe fiecare bloc și `file_checksum` sunt verificate. |
 | **Pachete** `.ftpack` (ca `.vflashpack`) | **Export package…** sau `flashtool pack PROIECT -o x.ftpack [--sealed]`. Pachetul conține proiectul, firmware-ul, secvențele, cataloagele, Seed&Key și certificatele, plus un manifest cu SHA-256. Un pachet **sigilat** se deschide read-only: se poate face flash, dar nu se poate edita. Cheile private nu sunt incluse decât cu `--include-private-keys`. |
 | **Custom actions** (ca Custom Actions VDS) | Pasul „Custom action (Python)” din editorul de secvențe apelează `run(ctx)` dintr-un fișier `.py`. `ctx` oferă `request`, `read_did`, `write_did`, `vars`, `log`, `sleep` și `args`. Pasul rulează doar dacă ECU-ul are **Allow custom actions** bifat. |
-| **Mesaje CAN ciclice** | În ECU settings, câmpul Cyclic messages, de exemplu `0x500=00 01 @100`: mesajul se trimite la fiecare 100 ms cât durează flash-ul (network management, keep-alive). |
+| **Mesaje CAN ciclice** | În ECU settings, câmpul Cyclic messages, de exemplu `0x500=00 01 @100`: mesajul se trimite la fiecare 100 ms cât durează flash-ul (network management, keep-alive). Din ECU tools îl pornești sau îl oprești manual. |
+| **Wake-up** | În ECU settings → Wake-up and identification: frame-urile de trezire, câte repetări, cât se așteaptă după, și opțional **Wake up before every flash**. |
+| **Release folder** | În tabul Firmware, per fișier: **Release folder** (de exemplu share-ul unde ajung build-urile) și **File name filter** (de exemplu `app_*.hex`) pentru selectorul de pe card. Fără ele se folosește folderul fișierului curent. |
 | **API Python** | `from flashtool import api; api.flash("proiect.ftproj", on_event=print)`, pentru CI/CD și bancuri de test. |
 
 ## Proiect (`*.ftproj`)

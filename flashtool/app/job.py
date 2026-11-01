@@ -132,6 +132,15 @@ def _resolve(path: str | None, base_dir: str) -> str | None:
     return os.path.join(base_dir, path)
 
 
+def create_sim(project: Project, target: Target) -> SimulatedEcu | None:
+    """The built-in simulated ECU of a target with `simulate: true`."""
+    if not target.simulate:
+        return None
+    sim_cfg = dict(target.simulator)
+    sim_cfg["auth_trust_anchor"] = _resolve(sim_cfg.get("auth_trust_anchor"), project.base_dir)
+    return SimulatedEcu(SimConfig.from_dict(sim_cfg))
+
+
 def _make_transport(project: Project, target: Target, stack: ExitStack, run_dir: str,
                     sim: SimulatedEcu | None, shared: SharedCanBus | None) -> Transport:
     if target.transport in ("can", "canfd"):
@@ -234,11 +243,7 @@ def run_target(project: Project, target: Target, emit: Emit, cancel=None, *, bro
             if credentials is not None:
                 report["certificates"] = {"provider": target.certificates.provider, "role": credentials.role,
                                           "ecu": credentials.ecu}
-            sim = None
-            if target.simulate:
-                sim_cfg = dict(target.simulator)
-                sim_cfg["auth_trust_anchor"] = _resolve(sim_cfg.get("auth_trust_anchor"), project.base_dir)
-                sim = SimulatedEcu(SimConfig.from_dict(sim_cfg))
+            sim = create_sim(project, target)
             transport = _make_transport(project, target, stack, run_dir, sim, shared)
             report["transport"] = transport.describe()
 
@@ -249,6 +254,10 @@ def run_target(project: Project, target: Target, emit: Emit, cancel=None, *, bro
             trace.note(f"FlashTool {__version__} - {project.name} / {target.id} - {started.isoformat()}")
             transport.open()
             stack.callback(transport.close)
+            if target.wakeup.get("before_flash"):
+                from .tools import wake_up
+
+                emit(LogEvent(target.id, "info", wake_up(transport, target.wakeup)))
             client = UdsClient(transport, target.uds, trace)
             variables = {k: render_value(v, sequence["variables"]) for k, v in sequence["variables"].items()}
             engine = Engine(job=target.id, client=client, transport=transport, image=image, variables=variables,

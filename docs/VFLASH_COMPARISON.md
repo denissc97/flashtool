@@ -22,7 +22,9 @@ Legendă: ✅ există · 🟡 parțial · ❌ lipsește · — nu se aplică
 | **Securitate** | „Security Manager” add-on-uri de la OEM; TLS pentru DoIP | ✅ Seed&Key (DLL 32/64, .so, Python), 0x29 cu certificate, TLS | Interfața „Security Manager” Vector: nu |
 | **Flash paralel** | Station: până la 10 ECU-uri pe canale separate | ✅ un proces per bus, fără limită fixă | |
 | System Update | mai multe ECU-uri dependente pe un singur canal, sincronizate | ✅ grupuri de bus cu pași funcționali o singură dată și barrier | |
-| Mesaje de rețea | trimitere ciclică / la eveniment a mesajelor CAN statice | 🟡 ciclic: da · la eveniment: nu | |
+| Mesaje de rețea | trimitere ciclică / la eveniment a mesajelor CAN statice | 🟡 ciclic (în flash și manual, din ECU tools) și wake-up: da · la eveniment: nu | |
+| Trezire ECU | Activation Line / TC10 pentru Ethernet | 🟡 frame-uri de wake-up pe CAN, wake-up signal pe LIN · ❌ Activation Line, TC10 | Pentru Ethernet e nevoie de hardware |
+| Identificare ECU | (necunoscut, manualul n-a fost accesibil) | ✅ ECU tools → Read identification (DID-urile ISO 14229) | |
 | **Automatizare** | API C, C#, Python, SOVD; integrare ca bibliotecă | 🟡 API Python (`flashtool.api`), CLI cu evenimente JSON · ❌ C/C#, SOVD | Din C/C# se poate apela CLI-ul cu `--json` |
 | Integrare | CANoe, CANoe.DiVa, SIL Kit, CI/CT cu HIL | 🟡 CI/CD prin CLI/API și simulatorul inclus · ❌ CANoe, SIL Kit | |
 | **Pachete** | `.vflashpack`, `.vflashsealed` (protejat la scriere) | ✅ `.ftpack` cu manifest SHA-256, opțional sigilat | |

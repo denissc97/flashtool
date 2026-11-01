@@ -27,9 +27,12 @@ from ..app.project_io import load_yaml, new_project, new_target, project_from_da
 from ..hal.backends import list_channels
 from ..sequence import events as ev
 from ..sequence.loader import SequenceError, describe_step, flatten, is_builtin, load_sequence, template_path
-from .project_editor import FirmwareEditor, TargetEditor, put_release_file
+from .project_editor import (
+    FirmwareEditor, TargetEditor, entry_path, newer_release, put_release_file, release_candidates,
+)
 from .sequence_editor import SequenceEditor
 from .theme import apply_theme, icon, tokens
+from .tools_page import ToolsPage
 from .widgets import BUS_LABEL, DurationChart, EcuCard
 
 TRACE_LINES = 20000
@@ -84,7 +87,7 @@ def _page(title: str, subtitle: str = "") -> tuple[QWidget, QVBoxLayout, QHBoxLa
 
 
 class MainWindow(QMainWindow):
-    PAGES = ("flash", "configure", "trace", "reports", "hardware")
+    PAGES = ("flash", "configure", "tools", "trace", "reports", "hardware")
 
     def __init__(self, project_path: str | None = None):
         super().__init__()
@@ -116,8 +119,8 @@ class MainWindow(QMainWindow):
         row.addWidget(self._build_sidebar())
         row.addWidget(self.stack, 1)
         self.setCentralWidget(central)
-        for build in (self._build_flash_page, self._build_configure_page, self._build_trace_page,
-                      self._build_reports_page, self._build_hardware_page):
+        for build in (self._build_flash_page, self._build_configure_page, self._build_tools_page,
+                      self._build_trace_page, self._build_reports_page, self._build_hardware_page):
             self.stack.addWidget(build())
         self._build_shortcuts()
         self.show_page("flash")
@@ -154,7 +157,7 @@ class MainWindow(QMainWindow):
         self.nav_group.setExclusive(True)
         self.nav: dict[str, QPushButton] = {}
         for key, text, ico in (("flash", "Flash", "flash"), ("configure", "Configure", "config"),
-                               ("trace", "Trace && log", "trace"), ("reports", "Reports", "report"),
+                               ("tools", "ECU tools", "tools"), ("trace", "Trace && log", "trace"), ("reports", "Reports", "report"),
                                ("hardware", "Hardware", "chip")):
             b = QPushButton(text)
             b.setProperty("nav", True)
@@ -325,6 +328,10 @@ class MainWindow(QMainWindow):
         split.setSizes([260, 900])
         layout.addWidget(split, 1)
         return page
+
+    def _build_tools_page(self) -> QWidget:
+        self.tools = ToolsPage(self._log, self._mono())
+        return self.tools
 
     def _build_trace_page(self) -> QWidget:
         page, layout, header = _page("Trace & log", "UDS requests and responses per ECU, and the log of all jobs")
@@ -498,9 +505,11 @@ class MainWindow(QMainWindow):
                 card.configure_clicked.connect(lambda tid: (self.select_target(tid), self.show_page("configure")))
                 card.report_clicked.connect(self._open_report)
                 card.files_dropped.connect(self.put_release)
+                card.release_chosen.connect(self.choose_release)
                 card.selected.connect(self.select_target)
                 self.cards[t.id] = card
             card.set_target(t)
+            self._refresh_firmware_rows(t.id)
             card.set_state(self.states[t.id], t.id in self.manager.running)
         self._layout_cards()
         self.ecu_list.blockSignals(True)
@@ -511,6 +520,7 @@ class MainWindow(QMainWindow):
             self.ecu_list.addItem(item)
         self.ecu_list.blockSignals(False)
         self._sync_trace_combo()
+        self.tools.set_project(project, select or self.current_id)
         self.empty.setVisible(not ids)
         self.cards_scroll.setVisible(bool(ids))
         self._update_title()
@@ -535,7 +545,7 @@ class MainWindow(QMainWindow):
         order = [t.id for t in self.project.targets] if self.project else []
         for i, tid in enumerate(order):
             if tid in self.cards:
-                self.cards_grid.addWidget(self.cards[tid], i // columns, i % columns)
+                self.cards_grid.addWidget(self.cards[tid], i // columns, i % columns, Qt.AlignmentFlag.AlignTop)
 
     def select_target(self, target_id: str | None) -> None:
         if not target_id or self.project is None or target_id == self.current_id:
@@ -597,12 +607,14 @@ class MainWindow(QMainWindow):
             return
         for t in project.targets:
             self.cards[t.id].set_target(t)
+            self._refresh_firmware_rows(t.id)
             item = self.ecu_list.item(new_ids.index(t.id))
             item.setText(f"{t.name}\n{BUS_LABEL.get(t.transport, t.transport)} · {t.id}")
         if self.current_id:
             target = project.target(self.current_id)
             self._show_sequence(target)
             self._show_template(target)
+        self.tools.set_project(project)
         self._update_actions()
 
     def save_project(self) -> bool:
@@ -717,6 +729,66 @@ class MainWindow(QMainWindow):
             self.fw_editor.set_entries(entries)
         else:
             self.select_target(target_id)
+
+    # one-click release switching on the cards
+    def _history_key(self, target_id: str, index: int) -> str:
+        import hashlib
+
+        project = hashlib.sha1((self.project_path or "").encode()).hexdigest()[:12]
+        return f"release_history/{project}/{target_id}/{index}"
+
+    def _history(self, target_id: str, index: int) -> list[str]:
+        value = self.settings.value(self._history_key(target_id, index), [])
+        return [value] if isinstance(value, str) else list(value or [])
+
+    def _refresh_firmware_rows(self, target_id: str) -> None:
+        raw_target = self._raw_target(target_id)
+        card = self.cards.get(target_id)
+        if raw_target is None or card is None or self.project is None:
+            return
+        base = self.project.base_dir
+        rows = []
+        for i, entry in enumerate(raw_target.get("firmware") or []):
+            if not isinstance(entry, dict):
+                entry = {"file": str(entry)}
+            rows.append({
+                "index": i, "path": entry_path(entry, base), "session": entry.get("session"),
+                "provider": lambda e=dict(entry), i=i: release_candidates(e, base, self._history(target_id, i)),
+                "newer": newer_release(entry, base),
+            })
+        card.set_firmware(rows, editable=not self.sealed and target_id not in self.manager.running)
+
+    def choose_release(self, target_id: str, index: int, path: str) -> None:
+        """A release picked on a card (one click); "" opens a file dialog for that entry."""
+        raw_target = self._raw_target(target_id)
+        if raw_target is None or self.project is None or self.manager.running or self.sealed:
+            return
+        entries = raw_target.setdefault("firmware", [])
+        if not 0 <= index < len(entries):
+            return
+        if not path:
+            current = entry_path(entries[index] if isinstance(entries[index], dict) else {"file": entries[index]},
+                                 self.project.base_dir)
+            path, _ = QFileDialog.getOpenFileName(self, f"Release for {target_id}", os.path.dirname(current),
+                                                  FIRMWARE_FILTER)
+            if not path:
+                return
+        try:
+            note = put_release_file(entries, path, self.project.base_dir, index, self.fw_editor._choose_session)
+        except Exception as exc:
+            QMessageBox.warning(self, "Release file", f"{os.path.basename(path)}: {exc}")
+            self._refresh_firmware_rows(target_id)
+            return
+        history = [p for p in self._history(target_id, index) if p != os.path.abspath(path)]
+        self.settings.setValue(self._history_key(target_id, index), [os.path.abspath(path)] + history[:9])
+        self._log(f"[{target_id}] {note}")
+        self.statusBar().showMessage(f"{target_id}: {note}", 8000)
+        self.states[target_id] = TargetState()
+        self._mark_dirty()
+        self._apply_timer.stop()
+        self._apply_edits()
+        if self.current_id == target_id:
+            self.fw_editor.set_entries(entries)
 
     def _entry_to_replace(self, target_id: str, entries: list, path: str) -> int | None:
         """None = add as a new file, -1 = cancelled, otherwise the index to replace."""
@@ -945,6 +1017,7 @@ class MainWindow(QMainWindow):
         if busy:
             QMessageBox.information(self, "FlashTool", f"Already running: {', '.join(busy)}")
             return
+        self.tools.release(ids)  # the job opens its own connection to the ECU
         for tid in ids:
             self.states[tid] = TargetState(status="starting")
         if self.current_id in ids:
@@ -1056,8 +1129,6 @@ class MainWindow(QMainWindow):
         self.add_btn.setEnabled(self.raw is not None and editable)
         self.remove_btn.setEnabled(bool(self.current_id) and editable)
         self.release_btn.setEnabled(bool(self.current_id) and editable)
-        for card in self.cards.values():
-            card.release_btn.setVisible(not self.sealed)
         self.seq_editor_btn.setEnabled(bool(self.current_id))
 
     # ======================================================================== reports
@@ -1141,6 +1212,7 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
         self.timer.stop()
+        self.tools.shutdown()
         self.manager.shutdown()
         event.accept()
 

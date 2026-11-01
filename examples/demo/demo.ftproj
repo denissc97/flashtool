@@ -4,7 +4,7 @@
 #  - bcm + door share one CAN bus: one process, functional steps sent once for both;
 #    door takes its firmware from a PDX (ODX-F session CAL_ONLY)
 #  - seat: LIN slave (LIN-TP, functional requests get no response on LIN)
-#  - gateway: CAN FD, its own process
+#  - gateway: CAN FD, its own process; sleeps until woken up, kept awake by a cyclic NM frame
 #  - adas: DoIP with certificate authentication (0x29), keys held by the credential broker
 #
 # For a real ECU on a Vector VN interface (Windows) change a target to:
@@ -70,6 +70,9 @@ targets:
       rx_id: 0x18DAF110
       func_id: 0x18DB33F1
       extended_id: true
+      cyclic: [{ id: 0x500, data: "01 00", period_ms: 200 }]   # network management: keeps the ECU awake
+    wakeup: { frames: [{ id: 0x500, data: "01 00" }], repeat: 3, wait_ms: 50, before_flash: true }
+    simulator: { sleep_timeout_ms: 1500, wakeup_id: 0x500 }  # the simulated gateway sleeps until woken up
     firmware:
       - { file: gateway.bin, base_address: 0x00100000 }
     sequence: uds_standard

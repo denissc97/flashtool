@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import datetime
 import os
+from typing import Callable
 
 from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QProgressBar, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
 from .project_editor import firmware_paths
@@ -39,6 +41,53 @@ class ElidedLabel(QLabel):
         super().setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, self.width()))
 
 
+class ReleaseCombo(QComboBox):
+    """Picks the file of one firmware entry. Re-reads the release folder each time it opens."""
+
+    chosen = Signal(str)  # path, or "" for "Browse…"
+
+    def __init__(self, provider: Callable[[], list[str]], parent=None):
+        super().__init__(parent)
+        self.provider = provider
+        self.current = ""
+        self.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.setMinimumContentsLength(18)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.activated.connect(self._activated)
+
+    def refill(self, current: str) -> None:
+        self.current = os.path.abspath(current)
+        paths = [os.path.abspath(p) for p in self.provider()]
+        if self.current not in paths:
+            paths.insert(0, self.current)
+        newest = paths[0] if paths else None
+        self.blockSignals(True)
+        self.clear()
+        for path in paths:
+            try:
+                when = datetime.datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d %H:%M")
+            except OSError:
+                when = "missing"
+            label = f"{os.path.basename(path)}    {when}" + ("    · newest" if path == newest and len(paths) > 1 else "")
+            self.addItem(label, path)
+            self.setItemData(self.count() - 1, path, Qt.ItemDataRole.ToolTipRole)
+        self.addItem("Browse…", "")
+        self.setCurrentIndex(paths.index(self.current))
+        self.setToolTip(self.current)
+        self.blockSignals(False)
+
+    def showPopup(self) -> None:
+        self.refill(self.current)  # new builds show up without reopening the project
+        super().showPopup()
+
+    def _activated(self, index: int) -> None:
+        path = self.itemData(index)
+        if path != self.current:
+            self.chosen.emit(path or "")
+        if not path:
+            self.setCurrentIndex(max(0, self.findData(self.current)))
+
+
 def pill(text: str, kind: str) -> QLabel:
     label = QLabel(text)
     label.setProperty("pill", kind)
@@ -51,6 +100,7 @@ class EcuCard(QFrame):
 
     flash_clicked = Signal(str)
     release_clicked = Signal(str)
+    release_chosen = Signal(str, int, str)  # target id, firmware entry index, path ("" = browse)
     configure_clicked = Signal(str)
     report_clicked = Signal(str)
     files_dropped = Signal(str, list)
@@ -78,18 +128,25 @@ class EcuCard(QFrame):
         top.addWidget(self.sim)
         top.addWidget(self.status)
 
-        self.files = QLabel()
-        self.files.setProperty("role", "mono")
-        self.files.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.files = QLabel()  # shown when the ECU has no firmware yet
+        self.files.setProperty("role", "muted")
         self.files.setWordWrap(True)
-        self.release_btn = QPushButton("Change release…")
+        self.release_btn = QPushButton("Add file…")
         self.release_btn.setProperty("kind", "ghost")
         self.release_btn.clicked.connect(lambda: self.release_clicked.emit(self.target_id))
-        fw = QHBoxLayout()
         self.fw_icon = QLabel()
-        fw.addWidget(self.fw_icon)
-        fw.addWidget(self.files, 1)
-        fw.addWidget(self.release_btn)
+        empty_row = QHBoxLayout()
+        empty_row.addWidget(self.fw_icon)
+        empty_row.addWidget(self.files, 1)
+        empty_row.addWidget(self.release_btn)
+        self.combos: list[ReleaseCombo] = []
+        self.latest_buttons: list[QPushButton] = []
+        self.fw_rows = QVBoxLayout()
+        self.fw_rows.setSpacing(6)
+        fw = QVBoxLayout()
+        fw.setSpacing(6)
+        fw.addLayout(self.fw_rows)
+        fw.addLayout(empty_row)
 
         self.progress = QProgressBar()
         self.progress.setRange(0, 1000)
@@ -130,12 +187,46 @@ class EcuCard(QFrame):
         self.ident.setText(t.id if t.name != t.id else "")
         self.bus.setText(BUS_LABEL.get(t.transport, t.transport))
         self.sim.setVisible(t.simulate)
-        if t.firmware:
-            names = [os.path.basename(f.file) + (f"  [{f.session}]" if f.session else "") for f in t.firmware]
-            self.files.setText("   ·   ".join(names))
-            self.files.setToolTip("\n".join(f.file for f in t.firmware))
-        else:
-            self.files.setText("No firmware yet – drop a .hex / .s19 / .bin / .pdx / .vbf file here")
+        self.files.setText("No firmware yet – drop a .hex / .s19 / .bin / .pdx / .vbf file here")
+        self.files.setVisible(not t.firmware)
+        self.fw_icon.setVisible(not t.firmware)
+
+    def set_firmware(self, rows: list[dict], editable: bool) -> None:
+        """One release picker per firmware entry: {index, path, provider, newer, session}."""
+        while self.fw_rows.count():
+            item = self.fw_rows.takeAt(0)
+            if item.layout() is not None:
+                while item.layout().count():
+                    w = item.layout().takeAt(0).widget()
+                    if w is not None:
+                        w.deleteLater()
+        self.combos, self.latest_buttons = [], []
+        self.release_btn.setVisible(not rows and editable)
+        for row in rows:
+            line = QHBoxLayout()
+            ico = QLabel()
+            ico.setPixmap(icon("doc", tokens()["muted"], 16).pixmap(16, 16))
+            combo = ReleaseCombo(row["provider"])
+            combo.refill(row["path"])
+            combo.setProperty("editable", editable)
+            combo.setEnabled(editable)
+            combo.chosen.connect(lambda path, i=row["index"]: self.release_chosen.emit(self.target_id, i, path))
+            line.addWidget(ico)
+            line.addWidget(combo, 1)
+            if row.get("session"):
+                line.addWidget(pill(row["session"], "badge"))
+            latest = QPushButton("Use latest")
+            latest.setProperty("kind", "primary")
+            latest.setIcon(icon("upload", "#ffffff", 14))
+            newer = row.get("newer")
+            latest.setVisible(bool(newer) and editable)
+            if newer:
+                latest.setToolTip(f"Newer build: {os.path.basename(newer)}")
+                latest.clicked.connect(lambda _=False, i=row["index"], p=newer: self.release_chosen.emit(self.target_id, i, p))
+            line.addWidget(latest)
+            self.fw_rows.addLayout(line)
+            self.combos.append(combo)
+            self.latest_buttons.append(latest)
 
     def set_state(self, st, running: bool) -> None:
         kind = {"starting": "running"}.get(st.status, st.status)
@@ -157,9 +248,11 @@ class EcuCard(QFrame):
             parts.append(st.error.splitlines()[0][:140])
         elif st.current:
             parts.append(st.current)
-        self.detail.setText("   ·   ".join(parts) if parts else "Drop a new release file here to replace the firmware")
+        self.detail.setText("   ·   ".join(parts) if parts else "Ready")
         self.flash_btn.setEnabled(not running)
         self.release_btn.setEnabled(not running)
+        for combo in self.combos:
+            combo.setEnabled(not running and combo.property("editable") is not False)
         self.report_btn.setEnabled(bool(st.report))
 
     def set_selected(self, selected: bool) -> None:

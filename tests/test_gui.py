@@ -205,7 +205,7 @@ def test_new_release_replaces_the_file_and_keeps_its_options(app, tmp_path):
         win.cards["ecu1"].files_dropped.emit("ecu1", [str(new)])  # dropped from the file manager on the card
         entry = win.raw["targets"][0]["firmware"][0]
         assert entry == {"file": str(new), "name": "application"}  # outside the project: absolute path
-        assert "app_v2.hex" in win.cards["ecu1"].files.text()
+        assert win.cards["ecu1"].combos[0].currentData() == str(new)
         assert "app_v2.hex" in win.fw_editor.file_info.text() and "SHA-256" in win.fw_editor.file_info.text()
         assert win.dirty and win.save_project()
 
@@ -308,5 +308,96 @@ def test_sealed_package_opens_read_only(app, tmp_path, monkeypatch):
         assert shown == ["Sealed package"] and not win.dirty
         assert win.flash_all_btn.isEnabled()  # flashing stays possible
     finally:
+        win.manager.shutdown()
+        win.close()
+
+
+# -- one-click release switching -----------------------------------------------------------
+def test_release_candidates_newest_first_and_pattern(tmp_path):
+    import time
+
+    from flashtool.gui.project_editor import newer_release, release_candidates
+
+    old = make_hex(tmp_path / "app_v1.hex", [(0x1000, b"\x01" * 16)])
+    time.sleep(0.02)
+    make_hex(tmp_path / "other.hex", [(0x1000, b"\x02" * 16)])
+    time.sleep(0.02)
+    new = make_hex(tmp_path / "app_v2.hex", [(0x1000, b"\x03" * 16)])
+    (tmp_path / "notes.txt").write_text("not firmware")
+    entry = {"file": "app_v1.hex"}
+    assert [os.path.basename(p) for p in release_candidates(entry, str(tmp_path))] == ["app_v2.hex", "other.hex",
+                                                                                      "app_v1.hex"]
+    entry["release_pattern"] = "app_*.hex"
+    assert [os.path.basename(p) for p in release_candidates(entry, str(tmp_path))] == ["app_v2.hex", "app_v1.hex"]
+    assert newer_release(entry, str(tmp_path)) == str(new)
+    assert newer_release({"file": str(new), "release_pattern": "app_*.hex"}, str(tmp_path)) is None
+    assert old
+
+
+def test_card_switches_release_in_one_click(app, tmp_path):
+    import time
+
+    win = MainWindow()
+    try:
+        _project_with_ecu(win, tmp_path)
+        card = win.cards["ecu1"]
+        assert not card.latest_buttons[0].isVisibleTo(card)  # app.hex is the newest file in the folder
+        time.sleep(0.02)
+        v2 = make_hex(tmp_path / "proj" / "app_v2.hex", [(0x10000, b"\x55" * 4096)])
+        win._refresh_firmware_rows("ecu1")
+        card = win.cards["ecu1"]
+        assert card.latest_buttons[0].isVisibleTo(card)
+        card.latest_buttons[0].click()  # one click: take the newest build
+        assert win.raw["targets"][0]["firmware"][0] == {"file": "app_v2.hex", "name": "application"}
+        card = win.cards["ecu1"]
+        assert card.combos[0].currentData() == str(v2) and not card.latest_buttons[0].isVisibleTo(card)
+        labels = [card.combos[0].itemText(i) for i in range(card.combos[0].count())]
+        assert labels[0].startswith("app_v2.hex") and labels[-1] == "Browse…"
+        back = card.combos[0].findData(str(tmp_path / "proj" / "app.hex"))
+        card.combos[0].activated.emit(back)  # pick the previous build from the list
+        assert win.raw["targets"][0]["firmware"][0]["file"] == "app.hex"
+        assert win.dirty and win.save_project()
+    finally:
+        win.manager.shutdown()
+        win.dirty = False
+        win.close()
+
+
+# -- ECU tools page --------------------------------------------------------------------
+def _wait(app, cond, timeout=10.0):
+    import time
+
+    end = time.time() + timeout
+    while not cond() and time.time() < end:
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+    return cond()
+
+
+def test_ecu_tools_page(app):
+    win = MainWindow(os.path.join(DEMO_DIR, "demo.ftproj"))
+    tools = win.tools
+    try:
+        win.show_page("tools")
+        tools.ecu.setCurrentIndex(tools.ecu.findData("gateway"))  # simulated gateway sleeps until woken up
+        assert "0x500" in tools.wake_info.text() and "before every flash" in tools.wake_info.text()
+        tools.toggle_connection()
+        assert _wait(app, lambda: tools.session is not None and not tools._busy)
+        tools.wake_btn.click()
+        assert _wait(app, lambda: not tools._busy)
+        tools.keep_btn.click()
+        assert _wait(app, lambda: not tools._busy) and tools.session.keep_alive_running
+        tools.read_btn.click()
+        assert _wait(app, lambda: not tools._busy and tools.table.rowCount() > 0)
+        values = {tools.table.item(r, 0).text(): tools.table.item(r, 2).text() for r in range(tools.table.rowCount())}
+        assert values["F190"] == "WFLASHTOOLSIM0001" and values["F195"] == "1.4.2"
+        tools.did_edit.setText("F18C")
+        tools.read_one()
+        assert _wait(app, lambda: not tools._busy and tools.table.item(tools.table.rowCount() - 1, 0).text() == "F18C")
+        tools.release(["gateway"])  # flashing the gateway frees the connection
+        assert tools.session is None and tools.state.text() == "Disconnected"
+    finally:
+        tools.shutdown()
         win.manager.shutdown()
         win.close()

@@ -48,6 +48,8 @@ class SimConfig:
     faults: list[Fault] = field(default_factory=list)
     auth_trust_anchor: str | None = None  # root CA (PEM/DER file) for Authentication 0x29
     require_authentication: bool = False  # programming needs 0x29 instead of 0x27
+    sleep_timeout_ms: int | None = None  # asleep until woken up; falls asleep again without keep-alive
+    wakeup_id: int | None = None  # CAN id that wakes / keeps the ECU awake (None: any frame)
     vin: str = "WFLASHTOOLSIM0001"
     sw_version: str = "BOOT-1.0"
 
@@ -96,8 +98,14 @@ class SimulatedEcu:
             0xF190: self.cfg.vin.encode(),
             0xF189: self.cfg.sw_version.encode(),
             0xF15A: bytes(9),
+            0xF187: b"FT-0001-SIM",
+            0xF18A: b"FlashTool Simulator",
+            0xF18C: b"SIM000123",
+            0xF191: b"HW-01",
+            0xF195: b"1.4.2",
         }
         self.offline_until = 0.0
+        self.awake_until = 0.0 if self.cfg.sleep_timeout_ms else float("inf")
         self.request_log: list[bytes] = []
         self._counts: dict[int, int] = {}
 
@@ -112,7 +120,13 @@ class SimulatedEcu:
 
     @property
     def online(self) -> bool:
-        return time.monotonic() >= self.offline_until
+        now = time.monotonic()
+        return now >= self.offline_until and now < self.awake_until
+
+    def wake(self) -> None:
+        """A wake-up or keep-alive frame was seen on the bus."""
+        if self.cfg.sleep_timeout_ms:
+            self.awake_until = time.monotonic() + self.cfg.sleep_timeout_ms / 1000
 
     # -- request handling ---------------------------------------------------
     def handle(self, req: bytes, functional: bool = False) -> list[Reply]:

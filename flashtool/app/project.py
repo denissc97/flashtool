@@ -39,6 +39,8 @@ class Target:
     certificates: CertConfig = field(default_factory=CertConfig)
     catalog: list = field(default_factory=list)  # paths or {file, layer} - diagnostic catalogs
     allow_custom_actions: bool = False  # sequences may run Python custom actions ('script' steps)
+    wakeup: dict = field(default_factory=dict)  # {frames: [{id, data}], repeat, interval_ms, wait_ms, before_flash}
+    identification: list = field(default_factory=list)  # DIDs for "Read identification" (default: ISO 14229 set)
     simulate: bool = False
     simulator: dict = field(default_factory=dict)
 
@@ -88,7 +90,8 @@ def _target(raw: dict, index: int) -> Target:
     tid = str(raw.get("id") or f"target{index + 1}")
     where = f"target '{tid}'"
     known = {"id", "name", "transport", "can", "doip", "lin", "uds", "firmware", "sequence", "variables",
-             "seed_key", "certificates", "catalog", "allow_custom_actions", "simulate", "simulator"}
+             "seed_key", "certificates", "catalog", "allow_custom_actions", "wakeup", "identification",
+             "simulate", "simulator"}
     unknown = set(raw) - known
     if unknown:
         raise ProjectError(f"{where}: unknown option(s) {', '.join(sorted(unknown))}")
@@ -115,6 +118,8 @@ def _target(raw: dict, index: int) -> Target:
         certificates=_build(CertConfig, raw.get("certificates"), f"{where}.certificates"),
         catalog=raw["catalog"] if isinstance(raw.get("catalog"), list) else ([raw["catalog"]] if raw.get("catalog") else []),
         allow_custom_actions=bool(raw.get("allow_custom_actions", False)),
+        wakeup=dict(raw.get("wakeup") or {}),
+        identification=[int(d) for d in raw.get("identification") or []],
         simulate=bool(raw.get("simulate", False)),
         simulator=dict(raw.get("simulator") or {}),
     )

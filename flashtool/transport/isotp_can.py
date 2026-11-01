@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 import can
@@ -96,6 +97,7 @@ class IsoTpCanTransport(Transport):
         self._stack: isotp.NotifierBasedCanStack | None = None
         self._bus_logger: can.Listener | None = None
         self._cyclic_tasks: list = []
+        self.autostart_cyclic = True  # interactive tools start the keep-alive on demand
         self.last_error: Exception | None = None
 
     # -- lifecycle -------------------------------------------------------
@@ -133,13 +135,43 @@ class IsoTpCanTransport(Transport):
             self.bus, self._notifier, address=address, params=params, error_handler=self._on_error
         )
         self._stack.start()
-        if self._external_bus is None:  # on a shared bus the owner of the bus sends them once
-            self._cyclic_tasks = [self.bus.send_periodic(m, p) for m, p in cyclic_messages(c.cyclic, c.fd)]
+        if self._external_bus is None and self.autostart_cyclic:  # on a shared bus its owner sends them once
+            self.start_cyclic()
 
-    def close(self) -> None:
+    def start_cyclic(self, entries: list | None = None) -> list[str]:
+        """Start sending the cyclic (keep-alive) messages; returns a description of each."""
+        if self.bus is None:
+            raise TransportError("transport is not open")
+        self.stop_cyclic()
+        msgs = cyclic_messages(self.config.cyclic if entries is None else entries, self.config.fd)
+        self._cyclic_tasks = [self.bus.send_periodic(m, p) for m, p in msgs]
+        return [f"0x{m.arbitration_id:X} [{bytes(m.data).hex(' ').upper()}] every {p * 1000:.0f} ms" for m, p in msgs]
+
+    def stop_cyclic(self) -> None:
         for task in self._cyclic_tasks:
             task.stop()
         self._cyclic_tasks = []
+
+    @property
+    def cyclic_running(self) -> bool:
+        return bool(self._cyclic_tasks)
+
+    def send_frames(self, frames: list[dict], repeat: int = 1, interval_ms: float = 10) -> int:
+        """Send raw CAN frames ({id, data, extended_id}), e.g. a wake-up / NM frame. Returns frames sent."""
+        if self.bus is None:
+            raise TransportError("transport is not open")
+        msgs = [m for m, _ in cyclic_messages([dict(f, period_ms=1) for f in frames], self.config.fd)]
+        sent = 0
+        for i in range(max(1, int(repeat))):
+            for m in msgs:
+                self.bus.send(m)
+                sent += 1
+            if i + 1 < repeat:
+                time.sleep(interval_ms / 1000)
+        return sent
+
+    def close(self) -> None:
+        self.stop_cyclic()
         if self._stack is not None:
             self._stack.stop()
             self._stack = None

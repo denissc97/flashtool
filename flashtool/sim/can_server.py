@@ -55,6 +55,9 @@ class CanEcuServer:
         self._thread = threading.Thread(target=self._run, name="sim-can-ecu", daemon=True)
 
     def _on_frame(self, msg: can.Message) -> None:
+        wake_id = self.ecu.cfg.wakeup_id
+        if self.ecu.cfg.sleep_timeout_ms and (wake_id is None or msg.arbitration_id == wake_id):
+            self.ecu.wake()
         if self.func_id is None or msg.arbitration_id != self.func_id or msg.is_extended_id != self.extended_id:
             return
         data = bytes(msg.data)
